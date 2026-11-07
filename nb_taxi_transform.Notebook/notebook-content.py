@@ -37,6 +37,30 @@
 
 # MARKDOWN ********************
 
+# ## 0. Configuration
+# Edit `MONTHS` here only. Every later cell reads it. Run this cell first in a new session.
+
+# CELL ********************
+
+import re
+
+# Months to process, as "YYYY-MM". Each needs Files/taxi/yellow_tripdata_YYYY-MM.parquet
+# (the same values you give the pipeline's `months` parameter).
+MONTHS = ["2025-11", "2025-12", "2026-01", "2026-02", "2026-03"]
+
+assert all(re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", m) for m in MONTHS), \
+    "MONTHS must be 'YYYY-MM' strings"
+print("months to process:", MONTHS)
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
 # ## 1. Silver Layer
 # Clean the raw data, apply quality filters, and add useful flags.
 
@@ -141,15 +165,12 @@ def load_month(month_start):
             f"in_type={in_type}  raw={raw_n:,}  written={written:,}  dropped={raw_n - written:,}")
 
 
-# --- the only thing you edit ---
-months = ["2025-11-01", "2025-12-01", "2026-01-01", "2026-02-01", "2026-03-01"]
-
 results = []
-for ms in months:
+for ym in MONTHS:
     try:
-        results.append(load_month(ms))
+        results.append(load_month(f"{ym}-01"))
     except Exception as e:
-        results.append((ms[:7], f"FAILED: {str(e)[:300]}"))
+        results.append((ym, f"FAILED: {str(e)[:300]}"))
 
 print("---- summary ----")
 for ym, msg in results:
@@ -213,7 +234,7 @@ print("wrote dbo.dim_date")
 
 # ## 3. FactTaxiDaily
 # Star-schema daily fact table with date_key foreign key.
-# Months are read from `dbo.silver_taxi`, so only the Silver cell's month list needs editing.
+# Months come from the `MONTHS` constant in the configuration cell. A month with no Silver rows is skipped.
 
 # CELL ********************
 
@@ -221,21 +242,18 @@ from pyspark.sql import functions as F
 
 target = "dbo.fact_taxi_daily"
 
-# months come from Silver: only the Silver cell's list needs editing
-months = [r[0] + "-01" for r in
-          spark.table("dbo.silver_taxi").select("year_month").distinct()
-               .orderBy("year_month").collect()]
-print("months:", months)
-
 def next_month(ms):
     y, m = int(ms[:4]), int(ms[5:7])
     return f"{y + (m == 12)}-{(m % 12) + 1:02d}-01"
 
-for month_start in months:
+for month_start in [f"{ym}-01" for ym in MONTHS]:
     month_end  = next_month(month_start)
     year_month = month_start[:7]
 
     silver = spark.table("dbo.silver_taxi").filter(F.col("year_month") == year_month)
+    if silver.limit(1).count() == 0:
+        print(f"{year_month}: no rows in silver, skipped")
+        continue
 
     fact = (
         silver
@@ -293,6 +311,11 @@ print("duplicate date_keys in dim_date:", dim.count() - dim.select("date_key").d
 print("rows with null net values:",
       fact.filter(F.col("net_fare_usd").isNull() | F.col("net_total_amount_usd").isNull()).count())
 print("dim_date range:", dim.agg(F.min("full_date"), F.max("full_date")).first())
+
+silver_months = {r[0] for r in spark.table("dbo.silver_taxi").select("year_month").distinct().collect()}
+fact_months   = {r[0] for r in fact.join(dim, "date_key").select("year_month").distinct().collect()}
+print("MONTHS missing from silver:", sorted(set(MONTHS) - silver_months))
+print("MONTHS missing from fact:  ", sorted(set(MONTHS) - fact_months))
 (fact.groupBy((F.col("date_key") / 100).cast("int").alias("ym"))
      .agg(F.count("*").alias("days"), F.sum("trip_count").alias("trips"))
      .orderBy("ym").show())
