@@ -142,7 +142,7 @@ def load_month(month_start):
 
 
 # --- the only thing you edit ---
-months = ["2026-01-01", "2026-02-01"]
+months = ["2025-11-01", "2025-12-01", "2026-01-01", "2026-02-01", "2026-03-01"]
 
 results = []
 for ms in months:
@@ -219,7 +219,7 @@ print("wrote dbo.dim_date")
 from pyspark.sql import functions as F
 
 target = "dbo.fact_taxi_daily"
-months = ["2026-01-01", "2026-02-01"]   # add new months here
+months = ["2025-11-01", "2025-12-01", "2026-01-01", "2026-02-01", "2026-03-01"]   # add new months here
 
 def next_month(ms):
     y, m = int(ms[:4]), int(ms[5:7])
@@ -240,6 +240,8 @@ for month_start in months:
             F.count(F.when(~F.col("is_negative_amount"), True)).alias("revenue_trip_count"),
             F.round(F.sum(F.when(~F.col("is_negative_amount"), F.col("fare_amount"))), 2).alias("total_fare_usd"),
             F.round(F.sum(F.when(~F.col("is_negative_amount"), F.col("total_amount"))), 2).alias("total_amount_usd"),
+            F.round(F.sum("fare_amount"), 2).alias("net_fare_usd"),
+            F.round(F.sum("total_amount"), 2).alias("net_total_amount_usd"),
             F.round(F.avg(F.when(~F.col("is_zero_distance"), F.col("trip_distance"))), 2).alias("avg_distance_miles"),
             F.round(F.avg("trip_duration_min"), 1).alias("avg_duration_min"),
             F.sum(F.col("is_zero_distance").cast("int")).alias("zero_distance_trips"),
@@ -252,6 +254,7 @@ for month_start in months:
     hi = int(month_end.replace("-", ""))
     (fact.write.mode("overwrite").format("delta")
          .option("replaceWhere", f"date_key >= {lo} AND date_key < {hi}")
+         .option("mergeSchema", "true")
          .saveAsTable(target))
     print(f"{year_month}: done")
 
@@ -273,9 +276,16 @@ from pyspark.sql import functions as F
 fact = spark.table("dbo.fact_taxi_daily")
 dim  = spark.table("dbo.dim_date")
 
+print("rows:", fact.count())
 print("fact dates missing from dim_date:", fact.join(dim, "date_key", "left_anti").count())
 print("duplicate date_keys in dim_date:", dim.count() - dim.select("date_key").distinct().count())
+print("rows with null net values:",
+      fact.filter(F.col("net_fare_usd").isNull() | F.col("net_total_amount_usd").isNull()).count())
 print("dim_date range:", dim.agg(F.min("full_date"), F.max("full_date")).first())
+(fact.groupBy((F.col("date_key") / 100).cast("int").alias("ym"))
+     .agg(F.count("*").alias("days"), F.sum("trip_count").alias("trips"))
+     .orderBy("ym").show())
+
 
 # METADATA ********************
 
