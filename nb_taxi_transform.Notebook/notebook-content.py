@@ -213,13 +213,19 @@ print("wrote dbo.dim_date")
 
 # ## 3. FactTaxiDaily
 # Star-schema daily fact table with date_key foreign key.
+# Months are read from `dbo.silver_taxi`, so only the Silver cell's month list needs editing.
 
 # CELL ********************
 
 from pyspark.sql import functions as F
 
 target = "dbo.fact_taxi_daily"
-months = ["2025-11-01", "2025-12-01", "2026-01-01", "2026-02-01", "2026-03-01"]   # add new months here
+
+# months come from Silver: only the Silver cell's list needs editing
+months = [r[0] + "-01" for r in
+          spark.table("dbo.silver_taxi").select("year_month").distinct()
+               .orderBy("year_month").collect()]
+print("months:", months)
 
 def next_month(ms):
     y, m = int(ms[:4]), int(ms[5:7])
@@ -252,10 +258,15 @@ for month_start in months:
 
     lo = int(month_start.replace("-", ""))
     hi = int(month_end.replace("-", ""))
-    (fact.write.mode("overwrite").format("delta")
-         .option("replaceWhere", f"date_key >= {lo} AND date_key < {hi}")
-         .option("mergeSchema", "true")
-         .saveAsTable(target))
+
+    if spark.catalog.tableExists(target):
+        (fact.write.mode("overwrite").format("delta")
+             .option("replaceWhere", f"date_key >= {lo} AND date_key < {hi}")
+             .option("mergeSchema", "true")
+             .saveAsTable(target))
+    else:
+        fact.write.format("delta").saveAsTable(target)
+
     print(f"{year_month}: done")
 
 # METADATA ********************
