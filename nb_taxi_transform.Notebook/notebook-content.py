@@ -235,9 +235,9 @@ print("wrote dbo.dim_date")
 # ## 3. FactTaxiDaily
 # Star-schema daily fact table with date_key foreign key.
 # Months come from the `MONTHS` constant in the configuration cell. A month with no Silver rows is skipped.
+# Includes a payment type 0 (Flex Fare) slice so averages can be computed with and without it.
 
 # CELL ********************
-
 from pyspark.sql import functions as F
 
 target = "dbo.fact_taxi_daily"
@@ -245,6 +245,12 @@ target = "dbo.fact_taxi_daily"
 def next_month(ms):
     y, m = int(ms[:4]), int(ms[5:7])
     return f"{y + (m == 12)}-{(m % 12) + 1:02d}-01"
+
+def sum_if(cond, col):
+    """Sum of col over rows matching cond, 0.0 (not null) when none match, rounded to cents."""
+    return F.round(F.coalesce(F.sum(F.when(cond, F.col(col))), F.lit(0.0)), 2)
+
+is_flex = F.col("payment_type") == 0   # TLC "Flex Fare trip"
 
 for month_start in [f"{ym}-01" for ym in MONTHS]:
     month_end  = next_month(month_start)
@@ -261,7 +267,7 @@ for month_start in [f"{ym}-01" for ym in MONTHS]:
         .groupBy("date_key")
         .agg(
             F.count("*").alias("trip_count"),
-            F.count(F.when(~F.col("is_negative_amount"), True)).alias("revenue_trip_count"),
+            F.count(F.when(F.col("total_amount") >= 0, True)).alias("revenue_trip_count"),
             F.round(F.sum(F.when(~F.col("is_negative_amount"), F.col("fare_amount"))), 2).alias("total_fare_usd"),
             F.round(F.sum(F.when(~F.col("is_negative_amount"), F.col("total_amount"))), 2).alias("total_amount_usd"),
             F.round(F.sum("fare_amount"), 2).alias("net_fare_usd"),
@@ -271,6 +277,10 @@ for month_start in [f"{ym}-01" for ym in MONTHS]:
             F.sum(F.col("is_zero_distance").cast("int")).alias("zero_distance_trips"),
             F.sum(F.col("is_negative_amount").cast("int")).alias("negative_amount_trips"),
             F.sum(F.col("is_passenger_missing").cast("int")).alias("missing_passenger_trips"),
+            # payment type 0 (Flex Fare) slice, so averages can be computed with and without it
+            F.count(F.when(is_flex, True)).alias("flex_fare_trip_count"),
+            sum_if(is_flex, "fare_amount").alias("net_fare_flex_usd"),
+            sum_if(is_flex, "total_amount").alias("net_total_amount_flex_usd"),
         )
     )
 
@@ -296,30 +306,89 @@ for month_start in [f"{ym}-01" for ym in MONTHS]:
 
 # MARKDOWN ********************
 
-# ## 4. Quick Validation
+# ## 4. Validation
+# Reconciles the fact table against Silver for every month in `MONTHS`; the last line must read ALL CHECKS PASSED.
 
 # CELL ********************
-
 from pyspark.sql import functions as F
 
-fact = spark.table("dbo.fact_taxi_daily")
-dim  = spark.table("dbo.dim_date")
+fact   = spark.table("dbo.fact_taxi_daily")
+dim    = spark.table("dbo.dim_date")
+silver = spark.table("dbo.silver_taxi")
+problems = []
 
-print("rows:", fact.count())
-print("fact dates missing from dim_date:", fact.join(dim, "date_key", "left_anti").count())
-print("duplicate date_keys in dim_date:", dim.count() - dim.select("date_key").distinct().count())
-print("rows with null net values:",
-      fact.filter(F.col("net_fare_usd").isNull() | F.col("net_total_amount_usd").isNull()).count())
+# ---- 1. per-month reconciliation: fact vs silver ----
+fact_m = (fact.join(dim, "date_key").groupBy("year_month")
+          .agg(F.count("*").alias("fact_days"),
+               F.sum("trip_count").alias("fact_trips"),
+               F.sum("revenue_trip_count").alias("fact_rtc"),
+               F.sum("flex_fare_trip_count").alias("fact_pt0"),
+               F.round(F.sum("net_total_amount_usd"), 2).alias("fact_net_total")))
+
+silver_m = (silver.groupBy("year_month")
+            .agg(F.count("*").alias("silver_trips"),
+                 F.sum((F.col("total_amount") >= 0).cast("int")).alias("silver_rtc"),
+                 F.sum((F.col("payment_type") == 0).cast("int")).alias("silver_pt0"),
+                 F.round(F.sum("total_amount"), 2).alias("silver_net_total")))
+
+dim_m = dim.groupBy("year_month").agg(F.count("*").alias("calendar_days"))
+
+recon = (silver_m.join(fact_m, "year_month", "full_outer")
+         .join(dim_m, "year_month", "left")
+         .withColumn("trips_diff",     F.col("silver_trips") - F.col("fact_trips"))
+         .withColumn("rtc_diff",       F.col("silver_rtc")   - F.col("fact_rtc"))
+         .withColumn("pt0_diff",       F.col("silver_pt0")   - F.col("fact_pt0"))
+         .withColumn("net_total_diff", F.round(F.col("silver_net_total") - F.col("fact_net_total"), 2))
+         .withColumn("days_diff",      F.col("calendar_days") - F.col("fact_days"))
+         .orderBy("year_month"))
+
+recon.select("year_month", "silver_trips", "fact_trips", "trips_diff", "rtc_diff",
+             "pt0_diff", "net_total_diff", "fact_days", "calendar_days", "days_diff").show(truncate=False)
+
+bad_months = recon.filter(
+    F.col("trips_diff").isNull() | (F.col("trips_diff") != 0) |
+    (F.col("rtc_diff") != 0) | (F.col("pt0_diff") != 0) |
+    (F.abs(F.col("net_total_diff")) > 1.0) |
+    F.col("days_diff").isNull() | (F.col("days_diff") != 0)).count()
+if bad_months:
+    problems.append(f"{bad_months} month(s) fail reconciliation")
+
+# ---- 2. table-level checks ----
+n_fact = fact.count()
+print("fact rows:", n_fact)
+
+missing_dates = fact.join(dim, "date_key", "left_anti").count()
+dup_fact      = n_fact - fact.select("date_key").distinct().count()
+dup_dim       = dim.count() - dim.select("date_key").distinct().count()
+print("fact dates missing from dim_date:", missing_dates)
+print("duplicate date_keys in fact:", dup_fact)
+print("duplicate date_keys in dim_date:", dup_dim)
+for name, v in [("dates missing from dim_date", missing_dates),
+                ("duplicate date_keys in fact", dup_fact),
+                ("duplicate date_keys in dim_date", dup_dim)]:
+    if v:
+        problems.append(f"{name}: {v}")
+
+must_have = ["trip_count", "revenue_trip_count", "net_fare_usd", "net_total_amount_usd",
+             "flex_fare_trip_count", "net_fare_flex_usd", "net_total_amount_flex_usd"]
+null_rows = fact.filter(F.expr(" OR ".join(f"{c} IS NULL" for c in must_have))).count()
+print("rows with null in required columns:", null_rows)
+if null_rows:
+    problems.append(f"{null_rows} fact rows have nulls in required columns")
+
 print("dim_date range:", dim.agg(F.min("full_date"), F.max("full_date")).first())
 
-silver_months = {r[0] for r in spark.table("dbo.silver_taxi").select("year_month").distinct().collect()}
+# ---- 3. MONTHS coverage ----
+silver_months = {r[0] for r in silver.select("year_month").distinct().collect()}
 fact_months   = {r[0] for r in fact.join(dim, "date_key").select("year_month").distinct().collect()}
-print("MONTHS missing from silver:", sorted(set(MONTHS) - silver_months))
-print("MONTHS missing from fact:  ", sorted(set(MONTHS) - fact_months))
-(fact.groupBy((F.col("date_key") / 100).cast("int").alias("ym"))
-     .agg(F.count("*").alias("days"), F.sum("trip_count").alias("trips"))
-     .orderBy("ym").show())
+miss_silver = sorted(set(MONTHS) - silver_months)
+miss_fact   = sorted(set(MONTHS) - fact_months)
+print("MONTHS missing from silver:", miss_silver)
+print("MONTHS missing from fact:  ", miss_fact)
+if miss_silver: problems.append(f"missing from silver: {miss_silver}")
+if miss_fact:   problems.append(f"missing from fact: {miss_fact}")
 
+print("\nALL CHECKS PASSED" if not problems else "\nPROBLEMS: " + "; ".join(problems))
 
 # METADATA ********************
 
