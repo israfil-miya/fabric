@@ -238,6 +238,7 @@ print("wrote dbo.dim_date")
 # Includes a payment type 0 (Flex Fare) slice so averages can be computed with and without it.
 
 # CELL ********************
+
 from pyspark.sql import functions as F
 
 target = "dbo.fact_taxi_daily"
@@ -310,6 +311,7 @@ for month_start in [f"{ym}-01" for ym in MONTHS]:
 # Reconciles the fact table against Silver for every month in `MONTHS`; the last line must read ALL CHECKS PASSED.
 
 # CELL ********************
+
 from pyspark.sql import functions as F
 
 fact   = spark.table("dbo.fact_taxi_daily")

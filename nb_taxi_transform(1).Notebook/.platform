@@ -2,11 +2,11 @@
   "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
   "metadata": {
     "type": "Notebook",
-    "displayName": "nb_taxi_transform",
-    "description": ""
+    "displayName": "nb_taxi_transform(1)",
+    "description": "New notebook"
   },
   "config": {
     "version": "2.0",
-    "logicalId": "ecc937a4-2f2c-8376-4396-b47d5966e957"
+    "logicalId": "de2234f2-c4e3-8da5-4dcd-f5d1ee1f385a"
   }
 }
