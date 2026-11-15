@@ -590,3 +590,394 @@ display(
 # META   "language": "python",
 # META   "language_group": "synapse_pyspark"
 # META }
+
+# CELL ********************
+
+# Cell 9: Load and validate sensor-level Gold data
+
+from pyspark.sql import functions as F
+
+sensor_daily = spark.read.table(
+    "dbo.fact_air_quality_daily_sensor"
+)
+
+# Configurable aggregation criteria
+MIN_SENSOR_COVERAGE_PCT = 75.0
+MIN_ELIGIBLE_SENSORS = 4
+
+# Check required columns
+required_columns = {
+    "sensor_id",
+    "local_date",
+    "hour_coverage_pct"
+}
+
+missing_columns = required_columns - set(sensor_daily.columns)
+
+if missing_columns:
+    raise ValueError(
+        f"Missing required columns: {sorted(missing_columns)}"
+    )
+
+# Identify the accepted PM2.5 daily average column
+if "avg_pm25_unflagged" in sensor_daily.columns:
+    PM25_COLUMN = "avg_pm25_unflagged"
+elif "avg_pm25_all_valid" in sensor_daily.columns:
+    PM25_COLUMN = "avg_pm25_all_valid"
+else:
+    raise ValueError(
+        "Could not find the daily PM2.5 average column."
+    )
+
+# Ensure each sensor has at most one record per date
+duplicates = (
+    sensor_daily
+    .groupBy("sensor_id", "local_date")
+    .count()
+    .filter(F.col("count") > 1)
+    .count()
+)
+
+if duplicates > 0:
+    raise ValueError(
+        f"Found {duplicates} duplicate sensor/date records."
+    )
+
+print("Source validation passed.")
+print(f"PM2.5 column: {PM25_COLUMN}")
+print(f"Coverage threshold: {MIN_SENSOR_COVERAGE_PCT}%")
+print(f"Minimum eligible sensors: {MIN_ELIGIBLE_SENSORS}")
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+# Cell 10: Calculate daily network metrics
+
+# Determine whether each sensor's daily reading is eligible
+sensor_daily_scored = (
+    sensor_daily
+    .withColumn(
+        "is_eligible",
+        (
+            (F.col("hour_coverage_pct") >= MIN_SENSOR_COVERAGE_PCT)
+            & F.col(PM25_COLUMN).isNotNull()
+        )
+    )
+)
+
+# Aggregate eligible sensor daily averages
+network_metrics = (
+    sensor_daily_scored
+    .groupBy("local_date")
+    .agg(
+        F.countDistinct(
+            F.when(
+                F.col(PM25_COLUMN).isNotNull(),
+                F.col("sensor_id")
+            )
+        ).alias("available_sensor_count"),
+
+        F.countDistinct(
+            F.when(
+                F.col("is_eligible"),
+                F.col("sensor_id")
+            )
+        ).alias("eligible_sensor_count"),
+
+        F.avg(
+            F.when(
+                F.col("is_eligible"),
+                F.col(PM25_COLUMN)
+            )
+        ).alias("candidate_network_mean_pm25"),
+
+        F.percentile_approx(
+            F.when(
+                F.col("is_eligible"),
+                F.col(PM25_COLUMN)
+            ),
+            0.5,
+            10000
+        ).alias("candidate_network_median_pm25"),
+
+        F.min(
+            F.when(
+                F.col("is_eligible"),
+                F.col(PM25_COLUMN)
+            )
+        ).alias("min_sensor_avg_pm25"),
+
+        F.max(
+            F.when(
+                F.col("is_eligible"),
+                F.col(PM25_COLUMN)
+            )
+        ).alias("max_sensor_avg_pm25"),
+
+        F.avg(
+            F.when(
+                F.col("is_eligible"),
+                F.col("hour_coverage_pct")
+            )
+        ).alias("avg_eligible_sensor_coverage_pct")
+    )
+)
+
+# Preserve every date from the sensor-level fact
+date_spine = (
+    sensor_daily
+    .select("local_date")
+    .distinct()
+)
+
+fact_air_quality_daily_citywide = (
+    date_spine
+    .join(
+        network_metrics,
+        on="local_date",
+        how="left"
+    )
+)
+
+# Require a minimum number of eligible sensors
+fact_air_quality_daily_citywide = (
+    fact_air_quality_daily_citywide
+    .withColumn(
+        "network_mean_pm25",
+        F.when(
+            F.col("eligible_sensor_count") >= MIN_ELIGIBLE_SENSORS,
+            F.col("candidate_network_mean_pm25")
+        )
+    )
+    .withColumn(
+        "network_median_pm25",
+        F.when(
+            F.col("eligible_sensor_count") >= MIN_ELIGIBLE_SENSORS,
+            F.col("candidate_network_median_pm25")
+        )
+    )
+    .withColumn(
+        "minimum_sensor_coverage_pct",
+        F.lit(MIN_SENSOR_COVERAGE_PCT)
+    )
+    .withColumn(
+        "minimum_eligible_sensor_count",
+        F.lit(MIN_ELIGIBLE_SENSORS)
+    )
+    .drop(
+        "candidate_network_mean_pm25",
+        "candidate_network_median_pm25"
+    )
+)
+
+print(
+    "Daily network records:",
+    fact_air_quality_daily_citywide.count()
+)
+
+display(
+    fact_air_quality_daily_citywide
+    .orderBy("local_date")
+)
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+# Cell 11: Save and validate the citywide fact
+
+# Save the citywide daily air-quality fact
+(
+    fact_air_quality_daily_citywide
+    .write
+    .format("delta")
+    .mode("overwrite")
+    .option("overwriteSchema", "true")
+    .saveAsTable("dbo.fact_air_quality_daily_citywide")
+)
+
+# Reload the saved table
+gold_citywide = spark.read.table(
+    "dbo.fact_air_quality_daily_citywide"
+)
+
+# Validate the date grain
+duplicate_dates = (
+    gold_citywide
+    .groupBy("local_date")
+    .count()
+    .filter(F.col("count") > 1)
+    .count()
+)
+
+if duplicate_dates > 0:
+    raise ValueError(
+        "Citywide fact contains duplicate dates."
+    )
+
+# Display overall statistics
+gold_citywide.agg(
+    F.count("*").alias("total_dates"),
+    F.min("local_date").alias("first_date"),
+    F.max("local_date").alias("last_date"),
+    F.sum(
+        F.when(
+            F.col("network_mean_pm25").isNotNull(),
+            1
+        ).otherwise(0)
+    ).alias("dates_with_network_estimate"),
+    F.min("eligible_sensor_count").alias("minimum_eligible_sensors"),
+    F.max("eligible_sensor_count").alias("maximum_eligible_sensors")
+).show(truncate=False)
+
+# Inspect dates with insufficient monitoring coverage
+display(
+    gold_citywide
+    .filter(
+        F.col("eligible_sensor_count") < MIN_ELIGIBLE_SENSORS
+    )
+    .orderBy("local_date")
+)
+
+print("Citywide daily air-quality fact validated.")
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+from pyspark.sql import functions as F
+
+# Load the existing Gold tables
+taxi = spark.table("dbo.fact_taxi_daily")
+date_dim = spark.table("dbo.dim_date")
+air_quality = spark.table("dbo.fact_air_quality_daily_citywide")
+
+# Map the air-quality local date to the shared date key
+air_quality_with_key = (
+    air_quality.alias("aq")
+    .join(
+        date_dim.select("date_key", "full_date").alias("d"),
+        F.col("aq.local_date") == F.col("d.full_date"),
+        "inner"
+    )
+    .select(
+        F.col("d.date_key"),
+        F.col("aq.available_sensor_count"),
+        F.col("aq.eligible_sensor_count"),
+        F.col("aq.min_sensor_avg_pm25"),
+        F.col("aq.max_sensor_avg_pm25"),
+        F.col("aq.avg_eligible_sensor_coverage_pct"),
+        F.col("aq.network_mean_pm25"),
+        F.col("aq.network_median_pm25"),
+        F.col("aq.minimum_sensor_coverage_pct"),
+        F.col("aq.minimum_eligible_sensor_count")
+    )
+)
+
+# Preserve every taxi date and attach matching air-quality metrics
+fact_taxi_air_quality = (
+    taxi.alias("t")
+    .join(
+        air_quality_with_key.alias("aq"),
+        on="date_key",
+        how="left"
+    )
+)
+
+# Write the combined Gold fact table
+(
+    fact_taxi_air_quality.write
+    .format("delta")
+    .mode("overwrite")
+    .option("overwriteSchema", "true")
+    .saveAsTable("dbo.fact_taxi_air_quality_daily")
+)
+
+print("Created dbo.fact_taxi_air_quality_daily")
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+from pyspark.sql import functions as F
+
+taxi = spark.table("dbo.fact_taxi_daily")
+combined = spark.table("dbo.fact_taxi_air_quality_daily")
+
+taxi_count = taxi.count()
+combined_count = combined.count()
+
+duplicate_dates = (
+    combined.groupBy("date_key")
+    .count()
+    .filter(F.col("count") > 1)
+    .count()
+)
+
+with_air_quality = combined.filter(
+    F.col("network_mean_pm25").isNotNull()
+).count()
+
+without_air_quality = combined.filter(
+    F.col("network_mean_pm25").isNull()
+).count()
+
+print(f"Taxi fact rows:             {taxi_count}")
+print(f"Combined fact rows:         {combined_count}")
+print(f"Duplicate date keys:        {duplicate_dates}")
+print(f"Dates with air quality:     {with_air_quality}")
+print(f"Dates without air quality:  {without_air_quality}")
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+display(
+    spark.table("dbo.fact_taxi_air_quality_daily")
+    .select(
+        "date_key",
+        "trip_count",
+        "total_amount_usd",
+        "avg_distance_miles",
+        "available_sensor_count",
+        "eligible_sensor_count",
+        "avg_eligible_sensor_coverage_pct",
+        "network_mean_pm25",
+        "network_median_pm25"
+    )
+    .orderBy("date_key")
+    .limit(30)
+)
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
