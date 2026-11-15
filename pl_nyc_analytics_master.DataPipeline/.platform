@@ -1,0 +1,12 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "DataPipeline",
+    "displayName": "pl_nyc_analytics_master",
+    "description": "Resolves one taxi month selection and runs the existing taxi Bronze-to-Gold flow."
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "a895b1a0-50cb-46c7-b9dc-640b7469f5dc"
+  }
+}

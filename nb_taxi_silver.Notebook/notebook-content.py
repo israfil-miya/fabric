@@ -26,18 +26,33 @@
 # MARKDOWN ********************
 
 # ## Configuration
-# Edit `MONTHS` here only. Every later cell reads it. Run this cell first in a new session.
+# The pipeline passes the resolved month list as JSON. Set MONTHS_JSON when running interactively.
 
-# CELL ********************
+# PARAMETERS CELL ********************
 
+import json
 import re
 
-# Months to process, as "YYYY-MM". Each needs Files/taxi/yellow_tripdata_YYYY-MM.parquet
-# (the same values you give the pipeline's `months` parameter).
-MONTHS = ["2025-11", "2025-12", "2026-01", "2026-02", "2026-03"]
+MONTHS_JSON = "[]"
 
-assert all(re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", m) for m in MONTHS), \
-    "MONTHS must be 'YYYY-MM' strings"
+
+def parse_months(months_json):
+    try:
+        months = json.loads(months_json)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("MONTHS_JSON must be a JSON array of YYYY-MM strings") from exc
+
+    if not isinstance(months, list) or not months:
+        raise ValueError("At least one month must be supplied in MONTHS_JSON")
+    if any(not isinstance(month, str) or not re.fullmatch(
+            r"[0-9]{4}-(0[1-9]|1[0-2])", month) for month in months):
+        raise ValueError("Each month must be a string in YYYY-MM format")
+    if len(months) != len(set(months)):
+        raise ValueError("MONTHS_JSON must not contain duplicate months")
+    return months
+
+
+MONTHS = parse_months(MONTHS_JSON)
 print("months to process:", MONTHS)
 
 # METADATA ********************
@@ -143,6 +158,13 @@ def load_month(month_start):
     ).count()
     assert bad == 0, f"{bad} rows fall outside {year_month}"
 
+    raw_n = raw.count()
+    if raw_n == 0:
+        raise ValueError(f"source Parquet file for {year_month} is empty")
+    silver_n = silver.count()
+    if silver_n == 0:
+        raise ValueError(f"quality filters produced no rows for {year_month}")
+
     if spark.catalog.tableExists(target):
         (silver.write.mode("overwrite").format("delta")
                .option("replaceWhere", f"year_month = '{year_month}'")
@@ -150,19 +172,18 @@ def load_month(month_start):
     else:
         silver.write.format("delta").saveAsTable(target)
 
-    raw_n = raw.count()
     written = spark.table(target).filter(F.col("year_month") == year_month).count()
-    assert written > 0, f"nothing written for {year_month}"
+    if written != silver_n:
+        raise ValueError(
+            f"Silver count mismatch for {year_month}: expected {silver_n}, wrote {written}"
+        )
     return (year_month,
             f"in_type={in_type}  raw={raw_n:,}  written={written:,}  dropped={raw_n - written:,}")
 
 
 results = []
 for ym in MONTHS:
-    try:
-        results.append(load_month(f"{ym}-01"))
-    except Exception as e:
-        results.append((ym, f"FAILED: {str(e)[:300]}"))
+    results.append(load_month(f"{ym}-01"))
 
 print("---- summary ----")
 for ym, msg in results:

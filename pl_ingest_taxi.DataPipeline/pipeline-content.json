@@ -75,7 +75,7 @@
               },
               "policy": {
                 "timeout": "0.12:00:00",
-                "retry": 0,
+                "retry": 3,
                 "retryIntervalInSeconds": 30,
                 "secureInput": false,
                 "secureOutput": false
@@ -91,10 +91,7 @@
     ],
     "parameters": {
       "months": {
-        "type": "array",
-        "defaultValue": [
-          "2026-03"
-        ]
+        "type": "array"
       }
     }
   }

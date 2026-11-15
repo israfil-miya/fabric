@@ -1,0 +1,147 @@
+{
+  "properties": {
+    "activities": [
+      {
+        "type": "TridentNotebook",
+        "typeProperties": {
+          "notebookId": "ca7dc489-2ed9-4f8d-bc27-1be83dcacda0",
+          "workspaceId": "14530c94-9dc4-4ef1-a320-081555064f5d",
+          "parameters": {
+            "MONTHS_JSON": {
+              "value": "@string(pipeline().parameters.months)",
+              "type": "string"
+            },
+            "DISCOVER_MONTHS": {
+              "value": "@pipeline().parameters.discover_months",
+              "type": "bool"
+            },
+            "CHECK_FILES": {
+              "value": "@not(pipeline().parameters.ingest_taxi)",
+              "type": "bool"
+            }
+          }
+        },
+        "policy": {
+          "timeout": "0.12:00:00",
+          "retry": 0,
+          "retryIntervalInSeconds": 30,
+          "secureInput": false,
+          "secureOutput": false
+        },
+        "name": "Resolve months",
+        "dependsOn": []
+      },
+      {
+        "type": "IfCondition",
+        "typeProperties": {
+          "expression": {
+            "value": "@pipeline().parameters.ingest_taxi",
+            "type": "Expression"
+          },
+          "ifTrueActivities": [
+            {
+              "type": "ExecutePipeline",
+              "typeProperties": {
+                "pipeline": {
+                  "referenceName": "pl_ingest_taxi",
+                  "type": "PipelineReference"
+                },
+                "waitOnCompletion": true,
+                "parameters": {
+                  "months": {
+                    "value": "@json(activity('Resolve months').output.result.exitValue)",
+                    "type": "Expression"
+                  }
+                }
+              },
+              "name": "Download selected taxi months",
+              "dependsOn": []
+            }
+          ],
+          "ifFalseActivities": []
+        },
+        "name": "Ingest taxi when requested",
+        "dependsOn": [
+          {
+            "activity": "Resolve months",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ]
+      },
+      {
+        "type": "TridentNotebook",
+        "typeProperties": {
+          "notebookId": "de2234f2-c4e3-8da5-4dcd-f5d1ee1f385a",
+          "workspaceId": "14530c94-9dc4-4ef1-a320-081555064f5d",
+          "parameters": {
+            "MONTHS_JSON": {
+              "value": "@activity('Resolve months').output.result.exitValue",
+              "type": "string"
+            }
+          }
+        },
+        "policy": {
+          "timeout": "0.12:00:00",
+          "retry": 0,
+          "retryIntervalInSeconds": 30,
+          "secureInput": false,
+          "secureOutput": false
+        },
+        "name": "Build taxi Silver",
+        "dependsOn": [
+          {
+            "activity": "Ingest taxi when requested",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ]
+      },
+      {
+        "type": "TridentNotebook",
+        "typeProperties": {
+          "notebookId": "0ed0f9bd-8138-85ab-4e8b-b0137792d84a",
+          "workspaceId": "14530c94-9dc4-4ef1-a320-081555064f5d",
+          "parameters": {
+            "MONTHS_JSON": {
+              "value": "@activity('Resolve months').output.result.exitValue",
+              "type": "string"
+            }
+          }
+        },
+        "policy": {
+          "timeout": "0.12:00:00",
+          "retry": 0,
+          "retryIntervalInSeconds": 30,
+          "secureInput": false,
+          "secureOutput": false
+        },
+        "name": "Build taxi Gold",
+        "dependsOn": [
+          {
+            "activity": "Build taxi Silver",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ]
+      }
+    ],
+    "parameters": {
+      "months": {
+        "type": "array",
+        "defaultValue": []
+      },
+      "discover_months": {
+        "type": "bool",
+        "defaultValue": false
+      },
+      "ingest_taxi": {
+        "type": "bool",
+        "defaultValue": true
+      }
+    }
+  }
+}

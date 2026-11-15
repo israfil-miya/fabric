@@ -26,18 +26,33 @@
 # MARKDOWN ********************
 
 # ## Configuration
-# Edit `MONTHS` here only. Every later cell reads it. Run this cell first in a new session.
+# The pipeline passes the resolved month list as JSON. Set MONTHS_JSON when running interactively.
 
-# CELL ********************
+# PARAMETERS CELL ********************
 
+import json
 import re
 
-# Months to process, as "YYYY-MM". Each needs Files/taxi/yellow_tripdata_YYYY-MM.parquet
-# (the same values you give the pipeline's `months` parameter).
-MONTHS = ["2025-11", "2025-12", "2026-01", "2026-02", "2026-03"]
+MONTHS_JSON = "[]"
 
-assert all(re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", m) for m in MONTHS), \
-    "MONTHS must be 'YYYY-MM' strings"
+
+def parse_months(months_json):
+    try:
+        months = json.loads(months_json)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("MONTHS_JSON must be a JSON array of YYYY-MM strings") from exc
+
+    if not isinstance(months, list) or not months:
+        raise ValueError("At least one month must be supplied in MONTHS_JSON")
+    if any(not isinstance(month, str) or not re.fullmatch(
+            r"[0-9]{4}-(0[1-9]|1[0-2])", month) for month in months):
+        raise ValueError("Each month must be a string in YYYY-MM format")
+    if len(months) != len(set(months)):
+        raise ValueError("MONTHS_JSON must not contain duplicate months")
+    return months
+
+
+MONTHS = parse_months(MONTHS_JSON)
 print("months to process:", MONTHS)
 
 # METADATA ********************
@@ -58,8 +73,27 @@ from pyspark.sql import functions as F
 from pyspark.sql.types import DateType
 from datetime import date, timedelta
 
-start = date(2024, 1, 1)
-end   = date(2027, 12, 31)
+def next_month_start(month):
+    year, month_number = int(month[:4]), int(month[5:7])
+    return date(year + (month_number == 12), month_number % 12 + 1, 1)
+
+
+selected_starts = [date.fromisoformat(f"{month}-01") for month in MONTHS]
+selected_ends = [
+    next_month_start(month) - timedelta(days=1) for month in MONTHS
+]
+start = min(selected_starts)
+end = max(selected_ends)
+
+if spark.catalog.tableExists("dbo.dim_date"):
+    existing_bounds = spark.table("dbo.dim_date").agg(
+        F.min("full_date").alias("min_date"),
+        F.max("full_date").alias("max_date")
+    ).first()
+    if existing_bounds["min_date"] is not None:
+        start = min(start, existing_bounds["min_date"])
+        end = max(end, existing_bounds["max_date"])
+
 days  = [(start + timedelta(days=i),) for i in range((end - start).days + 1)]
 
 df = spark.createDataFrame(days, ["full_date"]).withColumn("full_date", F.col("full_date").cast(DateType()))
@@ -98,7 +132,7 @@ print("wrote dbo.dim_date")
 
 # ## FactTaxiDaily
 # Star-schema daily fact table with date_key foreign key.
-# Months come from the `MONTHS` constant in the configuration cell. A month with no Silver rows is skipped.
+# Months come from the resolved `MONTHS` selection. A selected month with no Silver rows fails the run.
 # Includes a payment type 0 (Flex Fare) slice so averages can be computed with and without it.
 
 # CELL ********************
@@ -123,8 +157,7 @@ for month_start in [f"{ym}-01" for ym in MONTHS]:
 
     silver = spark.table("lh_silver.dbo.silver_taxi").filter(F.col("year_month") == year_month)
     if silver.limit(1).count() == 0:
-        print(f"{year_month}: no rows in silver, skipped")
-        continue
+        raise ValueError(f"{year_month}: no rows in Silver; refusing to publish Gold")
 
     fact = (
         silver
