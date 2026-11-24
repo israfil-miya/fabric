@@ -1,0 +1,12 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "Notebook",
+    "displayName": "nb_ingest_world_bank",
+    "description": "Ingests World Bank annual GDP indicator (NY.GDP.MKTP.CD) into lh_bronze raw JSON and Delta tables."
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "b740f52c-21c2-45f7-b5ac-2d52b9dd42e2"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "Notebook",
+    "displayName": "nb_economics_gold",
+    "description": "Builds dim_currency, dim_country, fact_gdp_annual, and calendar-complete fact_fx_daily in lh_gold."
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "4fece996-02d5-43d1-8238-0254de02e022"
+  }
+}

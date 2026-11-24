@@ -1,0 +1,12 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "Notebook",
+    "displayName": "nb_build_silver_economics",
+    "description": "Cleans, classifies, quarantines, and reconciles World Bank GDP and ECB FX Bronze data into lh_silver."
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "3d117816-4338-40e5-94b7-cb86fb6c64b8"
+  }
+}
