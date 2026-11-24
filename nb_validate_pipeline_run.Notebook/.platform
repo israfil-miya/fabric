@@ -1,0 +1,12 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "Notebook",
+    "displayName": "nb_validate_pipeline_run",
+    "description": "Runs end-to-end Bronze-Silver-Gold reconciliation across all sources and writes lh_gold.dbo.etl_run_log."
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "0763abd4-4661-4a48-9c96-2b57f50e25d1"
+  }
+}

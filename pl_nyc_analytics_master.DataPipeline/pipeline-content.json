@@ -8,24 +8,15 @@
           "workspaceId": "00000000-0000-0000-0000-000000000000",
           "parameters": {
             "MONTHS_JSON": {
-              "value": {
-                "value": "@string(pipeline().parameters.months)",
-                "type": "Expression"
-              },
+              "value": "@string(pipeline().parameters.months)",
               "type": "string"
             },
             "DISCOVER_MONTHS": {
-              "value": {
-                "value": "@pipeline().parameters.discover_months",
-                "type": "Expression"
-              },
+              "value": "@pipeline().parameters.discover_months",
               "type": "bool"
             },
             "CHECK_FILES": {
-              "value": {
-                "value": "@not(pipeline().parameters.ingest_taxi)",
-                "type": "Expression"
-              },
+              "value": "@not(pipeline().parameters.ingest_taxi)",
               "type": "bool"
             }
           }
@@ -55,16 +46,13 @@
                   "referenceName": "4eb01e5f-0ba8-b579-4a9a-192b5a6f8c1c",
                   "type": "PipelineReference"
                 },
+                "waitOnCompletion": true,
                 "parameters": {
                   "months": {
                     "value": "@json(activity('Resolve months').output.result.exitValue)",
                     "type": "Expression"
                   }
-                },
-                "waitOnCompletion": true
-              },
-              "policy": {
-                "secureInput": false
+                }
               },
               "name": "Download selected taxi months",
               "dependsOn": []
@@ -83,16 +71,121 @@
         ]
       },
       {
+        "type": "IfCondition",
+        "typeProperties": {
+          "expression": {
+            "value": "@pipeline().parameters.ingest_openaq",
+            "type": "Expression"
+          },
+          "ifTrueActivities": [
+            {
+              "type": "TridentNotebook",
+              "typeProperties": {
+                "notebookId": "657252f5-35c4-48e4-9580-4ae5b5466440",
+                "workspaceId": "00000000-0000-0000-0000-000000000000",
+                "parameters": {
+                  "MONTHS_JSON": {
+                    "value": "@activity('Resolve months').output.result.exitValue",
+                    "type": "string"
+                  }
+                }
+              },
+              "policy": {
+                "timeout": "0.12:00:00",
+                "retry": 0,
+                "retryIntervalInSeconds": 30,
+                "secureInput": false,
+                "secureOutput": false
+              },
+              "name": "Ingest OpenAQ API data",
+              "dependsOn": []
+            }
+          ],
+          "ifFalseActivities": []
+        },
+        "name": "Ingest OpenAQ when requested",
+        "dependsOn": [
+          {
+            "activity": "Resolve months",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ]
+      },
+      {
+        "type": "IfCondition",
+        "typeProperties": {
+          "expression": {
+            "value": "@pipeline().parameters.ingest_economics",
+            "type": "Expression"
+          },
+          "ifTrueActivities": [
+            {
+              "type": "TridentNotebook",
+              "typeProperties": {
+                "notebookId": "b740f52c-21c2-45f7-b5ac-2d52b9dd42e2",
+                "workspaceId": "00000000-0000-0000-0000-000000000000",
+                "parameters": {
+                  "MONTHS_JSON": {
+                    "value": "@activity('Resolve months').output.result.exitValue",
+                    "type": "string"
+                  }
+                }
+              },
+              "policy": {
+                "timeout": "0.12:00:00",
+                "retry": 0,
+                "retryIntervalInSeconds": 30,
+                "secureInput": false,
+                "secureOutput": false
+              },
+              "name": "Ingest World Bank GDP",
+              "dependsOn": []
+            },
+            {
+              "type": "TridentNotebook",
+              "typeProperties": {
+                "notebookId": "dacae969-3b55-465a-b010-c97a51a30255",
+                "workspaceId": "00000000-0000-0000-0000-000000000000",
+                "parameters": {
+                  "MONTHS_JSON": {
+                    "value": "@activity('Resolve months').output.result.exitValue",
+                    "type": "string"
+                  }
+                }
+              },
+              "policy": {
+                "timeout": "0.12:00:00",
+                "retry": 0,
+                "retryIntervalInSeconds": 30,
+                "secureInput": false,
+                "secureOutput": false
+              },
+              "name": "Ingest ECB FX",
+              "dependsOn": []
+            }
+          ],
+          "ifFalseActivities": []
+        },
+        "name": "Ingest economics when requested",
+        "dependsOn": [
+          {
+            "activity": "Resolve months",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ]
+      },
+      {
         "type": "TridentNotebook",
         "typeProperties": {
           "notebookId": "de2234f2-c4e3-8da5-4dcd-f5d1ee1f385a",
           "workspaceId": "00000000-0000-0000-0000-000000000000",
           "parameters": {
             "MONTHS_JSON": {
-              "value": {
-                "value": "@activity('Resolve months').output.result.exitValue",
-                "type": "Expression"
-              },
+              "value": "@activity('Resolve months').output.result.exitValue",
               "type": "string"
             }
           }
@@ -117,14 +210,69 @@
       {
         "type": "TridentNotebook",
         "typeProperties": {
+          "notebookId": "619fa252-42e1-afce-4d70-e04c87e5667e",
+          "workspaceId": "00000000-0000-0000-0000-000000000000",
+          "parameters": {
+            "MONTHS_JSON": {
+              "value": "@activity('Resolve months').output.result.exitValue",
+              "type": "string"
+            }
+          }
+        },
+        "policy": {
+          "timeout": "0.12:00:00",
+          "retry": 0,
+          "retryIntervalInSeconds": 30,
+          "secureInput": false,
+          "secureOutput": false
+        },
+        "name": "Build air quality Silver",
+        "dependsOn": [
+          {
+            "activity": "Ingest OpenAQ when requested",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ]
+      },
+      {
+        "type": "TridentNotebook",
+        "typeProperties": {
+          "notebookId": "3d117816-4338-40e5-94b7-cb86fb6c64b8",
+          "workspaceId": "00000000-0000-0000-0000-000000000000",
+          "parameters": {
+            "MONTHS_JSON": {
+              "value": "@activity('Resolve months').output.result.exitValue",
+              "type": "string"
+            }
+          }
+        },
+        "policy": {
+          "timeout": "0.12:00:00",
+          "retry": 0,
+          "retryIntervalInSeconds": 30,
+          "secureInput": false,
+          "secureOutput": false
+        },
+        "name": "Build economics Silver",
+        "dependsOn": [
+          {
+            "activity": "Ingest economics when requested",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ]
+      },
+      {
+        "type": "TridentNotebook",
+        "typeProperties": {
           "notebookId": "0ed0f9bd-8138-85ab-4e8b-b0137792d84a",
           "workspaceId": "00000000-0000-0000-0000-000000000000",
           "parameters": {
             "MONTHS_JSON": {
-              "value": {
-                "value": "@activity('Resolve months').output.result.exitValue",
-                "type": "Expression"
-              },
+              "value": "@activity('Resolve months').output.result.exitValue",
               "type": "string"
             }
           }
@@ -145,20 +293,162 @@
             ]
           }
         ]
+      },
+      {
+        "type": "TridentNotebook",
+        "typeProperties": {
+          "notebookId": "ff9cba72-c9cf-902e-47b7-11d8fb90476b",
+          "workspaceId": "00000000-0000-0000-0000-000000000000",
+          "parameters": {
+            "MONTHS_JSON": {
+              "value": "@activity('Resolve months').output.result.exitValue",
+              "type": "string"
+            }
+          }
+        },
+        "policy": {
+          "timeout": "0.12:00:00",
+          "retry": 0,
+          "retryIntervalInSeconds": 30,
+          "secureInput": false,
+          "secureOutput": false
+        },
+        "name": "Build air quality Gold",
+        "dependsOn": [
+          {
+            "activity": "Build air quality Silver",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ]
+      },
+      {
+        "type": "TridentNotebook",
+        "typeProperties": {
+          "notebookId": "4fece996-02d5-43d1-8238-0254de02e022",
+          "workspaceId": "00000000-0000-0000-0000-000000000000",
+          "parameters": {
+            "MONTHS_JSON": {
+              "value": "@activity('Resolve months').output.result.exitValue",
+              "type": "string"
+            }
+          }
+        },
+        "policy": {
+          "timeout": "0.12:00:00",
+          "retry": 0,
+          "retryIntervalInSeconds": 30,
+          "secureInput": false,
+          "secureOutput": false
+        },
+        "name": "Build economics Gold",
+        "dependsOn": [
+          {
+            "activity": "Build economics Silver",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ]
+      },
+      {
+        "type": "TridentNotebook",
+        "typeProperties": {
+          "notebookId": "6a89d67f-d2a3-a5b3-48a4-f64813b0c137",
+          "workspaceId": "00000000-0000-0000-0000-000000000000",
+          "parameters": {
+            "MONTHS_JSON": {
+              "value": "@activity('Resolve months').output.result.exitValue",
+              "type": "string"
+            }
+          }
+        },
+        "policy": {
+          "timeout": "0.12:00:00",
+          "retry": 0,
+          "retryIntervalInSeconds": 30,
+          "secureInput": false,
+          "secureOutput": false
+        },
+        "name": "Build combined Taxi-AQ Gold",
+        "dependsOn": [
+          {
+            "activity": "Build taxi Gold",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          },
+          {
+            "activity": "Build air quality Gold",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ]
+      },
+      {
+        "type": "TridentNotebook",
+        "typeProperties": {
+          "notebookId": "0763abd4-4661-4a48-9c96-2b57f50e25d1",
+          "workspaceId": "00000000-0000-0000-0000-000000000000",
+          "parameters": {
+            "MONTHS_JSON": {
+              "value": "@activity('Resolve months').output.result.exitValue",
+              "type": "string"
+            },
+            "RUN_ID": {
+              "value": "@pipeline().RunId",
+              "type": "string"
+            },
+            "PIPELINE_START_UTC": {
+              "value": "@pipeline().TriggerTime",
+              "type": "string"
+            }
+          }
+        },
+        "policy": {
+          "timeout": "0.12:00:00",
+          "retry": 0,
+          "retryIntervalInSeconds": 30,
+          "secureInput": false,
+          "secureOutput": false
+        },
+        "name": "Validate pipeline and log run",
+        "dependsOn": [
+          {
+            "activity": "Build combined Taxi-AQ Gold",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          },
+          {
+            "activity": "Build economics Gold",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ]
       }
     ],
     "parameters": {
       "months": {
         "type": "array",
-        "defaultValue": [
-          "2026-03"
-        ]
+        "defaultValue": []
       },
       "discover_months": {
         "type": "bool",
         "defaultValue": false
       },
       "ingest_taxi": {
+        "type": "bool",
+        "defaultValue": true
+      },
+      "ingest_openaq": {
+        "type": "bool",
+        "defaultValue": true
+      },
+      "ingest_economics": {
         "type": "bool",
         "defaultValue": true
       }

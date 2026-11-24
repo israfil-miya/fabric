@@ -3,7 +3,7 @@
   "metadata": {
     "type": "DataPipeline",
     "displayName": "pl_nyc_analytics_master",
-    "description": "Resolves one taxi month selection and runs the existing taxi Bronze-to-Gold flow."
+    "description": "Resolves one month selection and orchestrates NYC Taxi, OpenAQ, World Bank GDP, ECB FX, combined Gold, and end-to-end validation."
   },
   "config": {
     "version": "2.0",
