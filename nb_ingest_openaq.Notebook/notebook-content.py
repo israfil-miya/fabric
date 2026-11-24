@@ -373,9 +373,10 @@ audit_rows = []
 
 for ym in MONTHS:
     start_utc, end_utc = month_local_bounds_utc(ym)
-    # Query [start_utc, end_utc - 1s] so boundary hour end_utc (belongs to next month) is not over-fetched.
+    # Query through end_utc because OpenAQ /hours filters period end (datetimeTo <= datetime_to);
+    # the Python check (start_utc <= from_utc_dt < end_utc) keeps exact half-open month boundaries.
     query_from = start_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
-    query_to = (end_utc - timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    query_to = end_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
 
     for sid in SENSOR_IDS:
         loc_id = int(sensor_to_location[sid]["id"])
