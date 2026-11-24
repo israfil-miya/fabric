@@ -8,15 +8,24 @@
           "workspaceId": "00000000-0000-0000-0000-000000000000",
           "parameters": {
             "MONTHS_JSON": {
-              "value": "@string(pipeline().parameters.months)",
+              "value": {
+                "value": "@string(pipeline().parameters.months)",
+                "type": "Expression"
+              },
               "type": "string"
             },
             "DISCOVER_MONTHS": {
-              "value": "@pipeline().parameters.discover_months",
+              "value": {
+                "value": "@pipeline().parameters.discover_months",
+                "type": "Expression"
+              },
               "type": "bool"
             },
             "CHECK_FILES": {
-              "value": "@not(pipeline().parameters.ingest_taxi)",
+              "value": {
+                "value": "@not(pipeline().parameters.ingest_taxi)",
+                "type": "Expression"
+              },
               "type": "bool"
             }
           }
@@ -46,13 +55,16 @@
                   "referenceName": "4eb01e5f-0ba8-b579-4a9a-192b5a6f8c1c",
                   "type": "PipelineReference"
                 },
-                "waitOnCompletion": true,
                 "parameters": {
                   "months": {
                     "value": "@json(activity('Resolve months').output.result.exitValue)",
                     "type": "Expression"
                   }
-                }
+                },
+                "waitOnCompletion": true
+              },
+              "policy": {
+                "secureInput": false
               },
               "name": "Download selected taxi months",
               "dependsOn": []
@@ -85,7 +97,10 @@
                 "workspaceId": "00000000-0000-0000-0000-000000000000",
                 "parameters": {
                   "MONTHS_JSON": {
-                    "value": "@activity('Resolve months').output.result.exitValue",
+                    "value": {
+                      "value": "@activity('Resolve months').output.result.exitValue",
+                      "type": "Expression"
+                    },
                     "type": "string"
                   }
                 }
@@ -128,7 +143,10 @@
                 "workspaceId": "00000000-0000-0000-0000-000000000000",
                 "parameters": {
                   "MONTHS_JSON": {
-                    "value": "@activity('Resolve months').output.result.exitValue",
+                    "value": {
+                      "value": "@activity('Resolve months').output.result.exitValue",
+                      "type": "Expression"
+                    },
                     "type": "string"
                   }
                 }
@@ -150,7 +168,10 @@
                 "workspaceId": "00000000-0000-0000-0000-000000000000",
                 "parameters": {
                   "MONTHS_JSON": {
-                    "value": "@activity('Resolve months').output.result.exitValue",
+                    "value": {
+                      "value": "@activity('Resolve months').output.result.exitValue",
+                      "type": "Expression"
+                    },
                     "type": "string"
                   }
                 }
@@ -185,7 +206,10 @@
           "workspaceId": "00000000-0000-0000-0000-000000000000",
           "parameters": {
             "MONTHS_JSON": {
-              "value": "@activity('Resolve months').output.result.exitValue",
+              "value": {
+                "value": "@activity('Resolve months').output.result.exitValue",
+                "type": "Expression"
+              },
               "type": "string"
             }
           }
@@ -214,7 +238,10 @@
           "workspaceId": "00000000-0000-0000-0000-000000000000",
           "parameters": {
             "MONTHS_JSON": {
-              "value": "@activity('Resolve months').output.result.exitValue",
+              "value": {
+                "value": "@activity('Resolve months').output.result.exitValue",
+                "type": "Expression"
+              },
               "type": "string"
             }
           }
@@ -243,7 +270,10 @@
           "workspaceId": "00000000-0000-0000-0000-000000000000",
           "parameters": {
             "MONTHS_JSON": {
-              "value": "@activity('Resolve months').output.result.exitValue",
+              "value": {
+                "value": "@activity('Resolve months').output.result.exitValue",
+                "type": "Expression"
+              },
               "type": "string"
             }
           }
@@ -272,7 +302,10 @@
           "workspaceId": "00000000-0000-0000-0000-000000000000",
           "parameters": {
             "MONTHS_JSON": {
-              "value": "@activity('Resolve months').output.result.exitValue",
+              "value": {
+                "value": "@activity('Resolve months').output.result.exitValue",
+                "type": "Expression"
+              },
               "type": "string"
             }
           }
@@ -301,7 +334,10 @@
           "workspaceId": "00000000-0000-0000-0000-000000000000",
           "parameters": {
             "MONTHS_JSON": {
-              "value": "@activity('Resolve months').output.result.exitValue",
+              "value": {
+                "value": "@activity('Resolve months').output.result.exitValue",
+                "type": "Expression"
+              },
               "type": "string"
             }
           }
@@ -330,7 +366,10 @@
           "workspaceId": "00000000-0000-0000-0000-000000000000",
           "parameters": {
             "MONTHS_JSON": {
-              "value": "@activity('Resolve months').output.result.exitValue",
+              "value": {
+                "value": "@activity('Resolve months').output.result.exitValue",
+                "type": "Expression"
+              },
               "type": "string"
             }
           }
@@ -359,7 +398,10 @@
           "workspaceId": "00000000-0000-0000-0000-000000000000",
           "parameters": {
             "MONTHS_JSON": {
-              "value": "@activity('Resolve months').output.result.exitValue",
+              "value": {
+                "value": "@activity('Resolve months').output.result.exitValue",
+                "type": "Expression"
+              },
               "type": "string"
             }
           }
@@ -394,15 +436,24 @@
           "workspaceId": "00000000-0000-0000-0000-000000000000",
           "parameters": {
             "MONTHS_JSON": {
-              "value": "@activity('Resolve months').output.result.exitValue",
+              "value": {
+                "value": "@activity('Resolve months').output.result.exitValue",
+                "type": "Expression"
+              },
               "type": "string"
             },
             "RUN_ID": {
-              "value": "@pipeline().RunId",
+              "value": {
+                "value": "@pipeline().RunId",
+                "type": "Expression"
+              },
               "type": "string"
             },
             "PIPELINE_START_UTC": {
-              "value": "@pipeline().TriggerTime",
+              "value": {
+                "value": "@pipeline().TriggerTime",
+                "type": "Expression"
+              },
               "type": "string"
             }
           }
@@ -434,7 +485,9 @@
     "parameters": {
       "months": {
         "type": "array",
-        "defaultValue": []
+        "defaultValue": [
+          "2026-03"
+        ]
       },
       "discover_months": {
         "type": "bool",
