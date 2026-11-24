@@ -46,13 +46,13 @@
                   "referenceName": "4eb01e5f-0ba8-b579-4a9a-192b5a6f8c1c",
                   "type": "PipelineReference"
                 },
-                "waitOnCompletion": true,
                 "parameters": {
                   "months": {
                     "value": "@json(activity('Resolve months').output.result.exitValue)",
                     "type": "Expression"
                   }
-                }
+                },
+                "waitOnCompletion": true
               },
               "name": "Download selected taxi months",
               "dependsOn": []
