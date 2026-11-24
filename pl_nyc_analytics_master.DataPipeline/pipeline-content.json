@@ -5,7 +5,7 @@
         "type": "TridentNotebook",
         "typeProperties": {
           "notebookId": "ca7dc489-2ed9-4f8d-bc27-1be83dcacda0",
-          "workspaceId": "14530c94-9dc4-4ef1-a320-081555064f5d",
+          "workspaceId": "00000000-0000-0000-0000-000000000000",
           "parameters": {
             "MONTHS_JSON": {
               "value": "@string(pipeline().parameters.months)",
@@ -43,7 +43,7 @@
               "type": "ExecutePipeline",
               "typeProperties": {
                 "pipeline": {
-                  "referenceName": "pl_ingest_taxi",
+                  "referenceName": "4eb01e5f-0ba8-b579-4a9a-192b5a6f8c1c",
                   "type": "PipelineReference"
                 },
                 "waitOnCompletion": true,
@@ -74,7 +74,7 @@
         "type": "TridentNotebook",
         "typeProperties": {
           "notebookId": "de2234f2-c4e3-8da5-4dcd-f5d1ee1f385a",
-          "workspaceId": "14530c94-9dc4-4ef1-a320-081555064f5d",
+          "workspaceId": "00000000-0000-0000-0000-000000000000",
           "parameters": {
             "MONTHS_JSON": {
               "value": "@activity('Resolve months').output.result.exitValue",
@@ -103,7 +103,7 @@
         "type": "TridentNotebook",
         "typeProperties": {
           "notebookId": "0ed0f9bd-8138-85ab-4e8b-b0137792d84a",
-          "workspaceId": "14530c94-9dc4-4ef1-a320-081555064f5d",
+          "workspaceId": "00000000-0000-0000-0000-000000000000",
           "parameters": {
             "MONTHS_JSON": {
               "value": "@activity('Resolve months').output.result.exitValue",
