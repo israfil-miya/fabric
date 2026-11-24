@@ -240,7 +240,10 @@ for month_start in [f"{ym}-01" for ym in MONTHS]:
         (int((start_d + timedelta(days=i)).strftime("%Y%m%d")),)
         for i in range((end_d - start_d).days)
     ]
-    date_grid = spark.createDataFrame(month_dates, ["date_key"])
+    date_grid = (
+        spark.createDataFrame(month_dates, ["date_key"])
+        .withColumn("date_key", F.col("date_key").cast("int"))
+    )
 
     daily_agg = (
         silver
