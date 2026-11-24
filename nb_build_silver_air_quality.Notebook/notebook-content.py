@@ -638,39 +638,45 @@ silver_hourly = (
     )
 )
 
-quarantined_hourly = quarantined_hourly.select(
-    "sensor_id",
-    F.col("location_id").cast("long").alias("location_id"),
-    "location_name",
-    "timestamp_utc",
-    "timestamp_end_utc",
-    "local_datetime",
-    "local_date",
-    "local_hour",
-    "local_year_month",
-    "pm25_value",
-    "unit",
-    "parameter",
-    "period_label",
-    "has_flags",
-    "flag_status",
-    "raw_has_flags",
-    "quality_status",
-    "quality_reasons",
-    "quality_issue_count",
-    "is_missing_value",
-    "is_flagged",
-    "is_flag_status_unknown",
-    "is_negative_value",
-    "is_unexpected_parameter",
-    "is_unexpected_unit",
-    "is_unexpected_period",
-    "active_flag_event_count",
-    "active_flag_labels",
-    F.col("summary_min").cast("double").alias("within_hour_min"),
-    F.col("summary_max").cast("double").alias("within_hour_max"),
-    F.col("summary_mean").cast("double").alias("within_hour_mean"),
-    F.col("coverage_percent_complete").cast("double").alias("source_hour_coverage_percent"),
+q = quarantined_hourly.alias("q")
+qs = sensor_lookup.select("sensor_id", "location_id", "location_name").alias("qs")
+
+quarantined_hourly = (
+    q.join(qs, F.col("q.sensor_id") == F.col("qs.sensor_id"), "left")
+    .select(
+        F.col("q.sensor_id"),
+        F.col("qs.location_id").cast("long").alias("location_id"),
+        F.coalesce(F.col("qs.location_name"), F.col("q.location_name")).alias("location_name"),
+        F.col("q.timestamp_utc"),
+        F.col("q.timestamp_end_utc"),
+        F.col("q.local_datetime"),
+        F.col("q.local_date"),
+        F.col("q.local_hour"),
+        F.col("q.local_year_month"),
+        F.col("q.pm25_value"),
+        F.col("q.unit"),
+        F.col("q.parameter"),
+        F.col("q.period_label"),
+        F.col("q.has_flags"),
+        F.col("q.flag_status"),
+        F.col("q.raw_has_flags"),
+        F.col("q.quality_status"),
+        F.col("q.quality_reasons"),
+        F.col("q.quality_issue_count"),
+        F.col("q.is_missing_value"),
+        F.col("q.is_flagged"),
+        F.col("q.is_flag_status_unknown"),
+        F.col("q.is_negative_value"),
+        F.col("q.is_unexpected_parameter"),
+        F.col("q.is_unexpected_unit"),
+        F.col("q.is_unexpected_period"),
+        F.col("q.active_flag_event_count"),
+        F.col("q.active_flag_labels"),
+        F.col("q.summary_min").cast("double").alias("within_hour_min"),
+        F.col("q.summary_max").cast("double").alias("within_hour_max"),
+        F.col("q.summary_mean").cast("double").alias("within_hour_mean"),
+        F.col("q.coverage_percent_complete").cast("double").alias("source_hour_coverage_percent"),
+    )
 )
 
 # Validate Silver datasets prior to writing.
