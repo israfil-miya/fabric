@@ -31,7 +31,7 @@
 import json
 import re
 
-MONTHS_JSON = "[]"
+MONTHS_JSON = '["2025-11","2025-12","2026-01","2026-02","2026-03"]'
 SECRET_FILE_PATH = "Files/_secrets/openaq.json"
 KEY_VAULT_URL = ""
 KEY_VAULT_SECRET_NAME = "openaq-api-key"
