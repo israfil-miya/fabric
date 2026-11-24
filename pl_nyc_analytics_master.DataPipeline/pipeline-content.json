@@ -485,9 +485,7 @@
     "parameters": {
       "months": {
         "type": "array",
-        "defaultValue": [
-          "2026-03"
-        ]
+        "defaultValue": []
       },
       "discover_months": {
         "type": "bool",
