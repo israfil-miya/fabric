@@ -1,0 +1,12 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "Notebook",
+    "displayName": "nb_ingest_openaq",
+    "description": "Ingests OpenAQ v3 hourly PM2.5 measurements, metadata, and flags into lh_bronze raw JSON and Delta tables."
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "657252f5-35c4-48e4-9580-4ae5b5466440"
+  }
+}
