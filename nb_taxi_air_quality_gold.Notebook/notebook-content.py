@@ -30,7 +30,7 @@
 import json
 import re
 
-MONTHS_JSON = "[]"
+MONTHS_JSON = '["2025-11","2025-12","2026-01","2026-02","2026-03"]'
 
 
 def parse_months(months_json):
