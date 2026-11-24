@@ -13,6 +13,9 @@
 # META       "default_lakehouse_workspace_id": "14530c94-9dc4-4ef1-a320-081555064f5d",
 # META       "known_lakehouses": [
 # META         {
+# META           "id": "43446074-db34-4162-b6f2-3289971e64a2"
+# META         },
+# META         {
 # META           "id": "29b14a15-b502-4b45-8d4e-a0b8ee212b0f"
 # META         },
 # META         {
@@ -120,6 +123,120 @@ dim_date = (
 print(f"rows: {dim_date.count()}")
 dim_date.write.mode("overwrite").format("delta").saveAsTable("dbo.dim_date")
 print("wrote dbo.dim_date")
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# ## DimTaxiZone
+# Official NYC TLC Taxi Zone Lookup dimension (`dim_taxi_zone`).
+# Preserves `-1` (missing `PULocationID`) and any unmatched location IDs as explicit `Unknown` rows rather than dropping trips.
+
+# CELL ********************
+
+import requests
+from pyspark.sql import functions as F
+from pyspark.sql.types import BooleanType, IntegerType, StringType, StructField, StructType
+
+TAXI_ZONE_URL = "https://d37ci6vzurychx.cloudfront.net/misc/taxi_zone_lookup.csv"
+BRONZE_ZONE_CSV = "abfss://nyc_analytics@onelake.dfs.fabric.microsoft.com/lh_bronze.Lakehouse/Files/taxi/taxi_zone_lookup.csv"
+ZONE_DIM_TABLE = "dbo.dim_taxi_zone"
+
+try:
+    resp = requests.get(TAXI_ZONE_URL, timeout=60)
+    resp.raise_for_status()
+    notebookutils.fs.put(BRONZE_ZONE_CSV, resp.text, True)
+    print(f"Downloaded official TLC Taxi Zone lookup to {BRONZE_ZONE_CSV}")
+except Exception as exc:
+    try:
+        notebookutils.fs.head(BRONZE_ZONE_CSV, 256)
+        print(f"WARNING: Live download failed ({exc}); using cached Bronze CSV at {BRONZE_ZONE_CSV}")
+    except Exception:
+        raise RuntimeError(
+            f"Failed to download {TAXI_ZONE_URL} and no cached file exists at {BRONZE_ZONE_CSV}"
+        ) from exc
+
+raw_zones = (
+    spark.read
+    .format("csv")
+    .option("header", "true")
+    .load(BRONZE_ZONE_CSV)
+)
+
+official_zones = (
+    raw_zones
+    .select(
+        F.col("LocationID").cast("int").alias("location_id"),
+        F.trim(F.col("Borough")).alias("borough"),
+        F.trim(F.col("Zone")).alias("zone_name"),
+        F.trim(F.col("service_zone")).alias("service_zone"),
+        F.lit(True).alias("is_known_zone"),
+    )
+)
+
+bad_official = official_zones.filter(F.col("location_id").isNull()).count()
+dup_official = official_zones.count() - official_zones.select("location_id").distinct().count()
+if bad_official > 0 or dup_official > 0:
+    raise ValueError(
+        f"Invalid TLC Taxi Zone lookup CSV: null_ids={bad_official}, duplicates={dup_official}"
+    )
+
+# Collect any location IDs from Silver (for MONTHS) or prior dim_taxi_zone that are absent from the lookup CSV.
+silver_location_ids = (
+    spark.table("lh_silver.dbo.silver_taxi")
+    .filter(F.col("year_month").isin(MONTHS))
+    .select(F.coalesce(F.col("PULocationID").cast("int"), F.lit(-1)).alias("location_id"))
+    .distinct()
+)
+observed_ids = {r["location_id"] for r in silver_location_ids.collect()}
+observed_ids.add(-1)  # Always retain explicit missing-location sentinel row
+
+if spark.catalog.tableExists(ZONE_DIM_TABLE):
+    prior_unknown_ids = {
+        r["location_id"]
+        for r in spark.table(ZONE_DIM_TABLE).filter(~F.col("is_known_zone")).select("location_id").collect()
+    }
+    observed_ids |= prior_unknown_ids
+
+official_ids = {r["location_id"] for r in official_zones.select("location_id").collect()}
+unmatched_ids = sorted(observed_ids - official_ids)
+
+fallback_schema = StructType([
+    StructField("location_id", IntegerType(), False),
+    StructField("borough", StringType(), False),
+    StructField("zone_name", StringType(), False),
+    StructField("service_zone", StringType(), False),
+    StructField("is_known_zone", BooleanType(), False),
+])
+fallback_rows = [
+    (
+        int(loc_id),
+        "Unknown",
+        "Missing Pickup Location" if loc_id == -1 else f"Unmatched Zone ({loc_id})",
+        "Unknown",
+        False,
+    )
+    for loc_id in unmatched_ids
+]
+fallback_df = spark.createDataFrame(fallback_rows, schema=fallback_schema)
+
+dim_taxi_zone = official_zones.unionByName(fallback_df).orderBy("location_id")
+(
+    dim_taxi_zone.write
+    .format("delta")
+    .mode("overwrite")
+    .option("overwriteSchema", "true")
+    .saveAsTable(ZONE_DIM_TABLE)
+)
+print(
+    f"wrote {ZONE_DIM_TABLE}: {dim_taxi_zone.count():,} rows "
+    f"(official={len(official_ids)}, fallback_unknown={len(unmatched_ids)})"
+)
 
 # METADATA ********************
 
@@ -349,6 +466,74 @@ for month_start in [f"{ym}-01" for ym in MONTHS]:
 
 # MARKDOWN ********************
 
+# ## FactTaxiHourlyZone
+# Grain: one row per `date_key + pickup_hour + PULocationID` (`-1` when `PULocationID` is NULL).
+# Note: NYC's 8 selected air-quality monitors do not provide zone-level PM2.5 coverage for every taxi zone;
+# this table supports temporal/spatial taxi demand analysis without implying zone-level pollution causality.
+
+# CELL ********************
+
+hourly_zone_target = "dbo.fact_taxi_hourly_zone"
+
+for month_start in [f"{ym}-01" for ym in MONTHS]:
+    month_end = next_month(month_start)
+    year_month = month_start[:7]
+
+    silver_m_df = spark.table(silver_table).filter(F.col("year_month") == year_month)
+    fact_hz = (
+        silver_m_df
+        .withColumn("date_key", F.date_format("pickup_date", "yyyyMMdd").cast("int"))
+        .withColumn("pickup_hour", F.col("pickup_hour").cast("int"))
+        .withColumn("PULocationID", F.coalesce(F.col("PULocationID").cast("int"), F.lit(-1)))
+        .groupBy("date_key", "pickup_hour", "PULocationID")
+        .agg(
+            F.count("*").alias("trip_count"),
+            F.count(F.when(is_nonnegative_revenue, True)).alias("revenue_trip_count"),
+            sum_if(is_nonnegative_revenue, "fare_amount").alias("total_fare_usd"),
+            sum_if(is_nonnegative_revenue, "total_amount").alias("total_amount_usd"),
+            sum_if(~F.col("is_missing_fare"), "fare_amount").alias("net_fare_usd"),
+            sum_if(~F.col("is_missing_total"), "total_amount").alias("net_total_amount_usd"),
+            F.round(
+                F.avg(F.when(is_valid_reported_distance, F.col("trip_distance"))),
+                2,
+            ).alias("avg_distance_miles"),
+            F.round(
+                F.avg(F.when(is_positive_distance, F.col("trip_distance"))),
+                2,
+            ).alias("avg_positive_distance_miles"),
+            F.round(F.avg("trip_duration_min"), 1).alias("avg_duration_min"),
+            sum_flag("is_zero_distance").alias("zero_distance_trip_count"),
+            sum_flag("is_missing_distance").alias("missing_distance_count"),
+            sum_flag("is_negative_distance").alias("negative_distance_count"),
+            sum_flag("is_unusual_distance").alias("unusual_distance_count"),
+            sum_flag("is_negative_amount").alias("negative_amount_trip_count"),
+            sum_flag("is_missing_amount").alias("missing_amount_trip_count"),
+            sum_flag("has_any_quality_flag").alias("quality_flagged_trip_count"),
+        )
+    )
+
+    lo = int(month_start.replace("-", ""))
+    hi = int(month_end.replace("-", ""))
+
+    if spark.catalog.tableExists(hourly_zone_target):
+        (fact_hz.write.mode("overwrite").format("delta")
+                .option("replaceWhere", f"date_key >= {lo} AND date_key < {hi}")
+                .option("mergeSchema", "true")
+                .saveAsTable(hourly_zone_target))
+    else:
+        fact_hz.write.format("delta").saveAsTable(hourly_zone_target)
+
+    print(f"fact_taxi_hourly_zone [{year_month}]: done")
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
 # ## Validation
 # Reconciles the fact table against Silver for every month in `MONTHS`; fails the notebook on any mismatch.
 
@@ -502,6 +687,77 @@ print("MONTHS missing passed audit:", miss_audit)
 if miss_silver: problems.append(f"missing from silver: {miss_silver}")
 if miss_fact:   problems.append(f"missing from fact: {miss_fact}")
 if miss_audit:  problems.append(f"missing passed audit: {miss_audit}")
+
+# ---- 4. dim_taxi_zone & fact_taxi_hourly_zone reconciliation ----
+zone_dim = spark.table("dbo.dim_taxi_zone")
+fact_hz = spark.table("dbo.fact_taxi_hourly_zone")
+fact_hz_scoped = fact_hz.join(dim.filter(F.col("year_month").isin(MONTHS)).select("date_key", "year_month"), "date_key")
+
+zone_null_ids = zone_dim.filter(F.col("location_id").isNull()).count()
+zone_dups = zone_dim.count() - zone_dim.select("location_id").distinct().count()
+hz_missing_dates = fact_hz.join(dim, "date_key", "left_anti").count()
+hz_missing_zones = fact_hz_scoped.join(zone_dim, fact_hz_scoped["PULocationID"] == zone_dim["location_id"], "left_anti").count()
+hz_bad_hours = fact_hz_scoped.filter(
+    F.col("pickup_hour").isNull() | (F.col("pickup_hour") < 0) | (F.col("pickup_hour") > 23)
+).count()
+hz_dups = (
+    fact_hz_scoped.groupBy("date_key", "pickup_hour", "PULocationID")
+    .count()
+    .filter(F.col("count") > 1)
+    .count()
+)
+
+print("dim_taxi_zone rows:", zone_dim.count(), "| null_ids:", zone_null_ids, "| dups:", zone_dups)
+print(
+    "fact_taxi_hourly_zone rows in MONTHS:", fact_hz_scoped.count(),
+    "| distinct zones:", fact_hz_scoped.select("PULocationID").distinct().count(),
+    "| missing_dates:", hz_missing_dates,
+    "| missing_zones:", hz_missing_zones,
+    "| bad_hours:", hz_bad_hours,
+    "| dup_keys:", hz_dups,
+)
+for name, v in [
+    ("dim_taxi_zone null location_ids", zone_null_ids),
+    ("dim_taxi_zone duplicate location_ids", zone_dups),
+    ("hourly_zone dates missing from dim_date", hz_missing_dates),
+    ("hourly_zone PULocationIDs missing from dim_taxi_zone", hz_missing_zones),
+    ("hourly_zone invalid pickup_hour", hz_bad_hours),
+    ("hourly_zone duplicate keys", hz_dups),
+]:
+    if v:
+        problems.append(f"{name}: {v}")
+
+hz_m = (
+    fact_hz_scoped.groupBy("year_month")
+    .agg(
+        F.sum("trip_count").alias("hz_trips"),
+        F.sum("revenue_trip_count").alias("hz_rtc"),
+        F.round(F.sum("total_amount_usd"), 2).alias("hz_gross_total"),
+        F.round(F.sum("net_total_amount_usd"), 2).alias("hz_net_total"),
+        F.sum("zero_distance_trip_count").alias("hz_zero_dist"),
+        F.sum("missing_distance_count").alias("hz_miss_dist"),
+    )
+)
+hz_recon = (
+    fact_m.join(hz_m, "year_month", "full_outer")
+    .withColumn("hz_trips_diff", F.col("fact_trips") - F.col("hz_trips"))
+    .withColumn("hz_rtc_diff", F.col("fact_rtc") - F.col("hz_rtc"))
+    .withColumn("hz_gross_diff", F.round(F.col("fact_gross_rev_total") - F.col("hz_gross_total"), 2))
+    .withColumn("hz_net_diff", F.round(F.col("fact_net_total") - F.col("hz_net_total"), 2))
+    .withColumn("hz_zero_dist_diff", F.col("fact_zero_dist") - F.col("hz_zero_dist"))
+    .orderBy("year_month")
+)
+hz_recon.show(truncate=False)
+
+bad_hz_months = hz_recon.filter(
+    F.col("hz_trips_diff").isNull() | (F.col("hz_trips_diff") != 0)
+    | F.col("hz_rtc_diff").isNull() | (F.col("hz_rtc_diff") != 0)
+    | F.col("hz_gross_diff").isNull() | (F.abs(F.col("hz_gross_diff")) > 1.0)
+    | F.col("hz_net_diff").isNull() | (F.abs(F.col("hz_net_diff")) > 1.0)
+    | F.col("hz_zero_dist_diff").isNull() | (F.col("hz_zero_dist_diff") != 0)
+).count()
+if bad_hz_months:
+    problems.append(f"{bad_hz_months} month(s) fail hourly_zone vs daily reconciliation")
 
 if problems:
     msg = "PROBLEMS: " + "; ".join(problems)
