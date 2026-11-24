@@ -30,10 +30,19 @@
 
 # PARAMETERS CELL ********************
 
+MONTHS_JSON = "[]"
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
 import json
 import re
-
-MONTHS_JSON = "[]"
 
 
 def parse_months(months_json):

@@ -33,12 +33,21 @@
 
 # PARAMETERS CELL ********************
 
-import json
-import re
-
 MONTHS_JSON = "[]"
 RUN_ID = ""
 PIPELINE_START_UTC = ""
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+import json
+import re
 
 
 def parse_months(months_json):

@@ -27,13 +27,22 @@
 
 # PARAMETERS CELL ********************
 
-import json
-import re
-
 MONTHS_JSON = '["2025-11","2025-12","2026-01","2026-02","2026-03"]'
 COUNTRIES_JSON = '["USA", "EMU"]'
 INDICATOR = "NY.GDP.MKTP.CD"
 LOOKBACK_YEARS = 5
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+import json
+import re
 
 
 def parse_months(months_json):

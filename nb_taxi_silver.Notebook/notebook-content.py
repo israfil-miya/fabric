@@ -30,11 +30,20 @@
 
 # PARAMETERS CELL ********************
 
+MONTHS_JSON = '["2025-11","2025-12","2026-01","2026-02","2026-03"]'
+INSPECT_SAMPLES = False
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
 import json
 import re
-
-MONTHS_JSON = '["2025-11","2025-12","2026-01","2026-02","2026-03"]'
-INSPECT_SAMPLES = True
 
 
 def parse_months(months_json):
