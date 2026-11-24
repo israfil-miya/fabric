@@ -23,29 +23,37 @@
 # META   }
 # META }
 
-# CELL ********************
+# MARKDOWN ********************
 
-# Cell 1: Imports and load Silver source tables
+# ## Configuration
+# The pipeline passes the resolved month list as JSON. Set `MONTHS_JSON` when running interactively.
 
-from pyspark.sql import functions as F
-from datetime import datetime, time, timedelta, timezone
-from zoneinfo import ZoneInfo
+# PARAMETERS CELL ********************
 
-silver_sensor = spark.read.table(
-    "lh_silver.dbo.silver_air_quality_sensor"
-)
+import json
+import re
 
-silver_hourly = spark.read.table(
-    "lh_silver.dbo.silver_air_quality_hourly"
-)
+MONTHS_JSON = "[]"
 
-silver_quarantine = spark.read.table(
-    "lh_silver.dbo.silver_air_quality_quarantine"
-)
 
-print(f"Silver sensors: {silver_sensor.count():,}")
-print(f"Accepted hourly records: {silver_hourly.count():,}")
-print(f"Quarantined records: {silver_quarantine.count():,}")
+def parse_months(months_json):
+    try:
+        months = json.loads(months_json)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("MONTHS_JSON must be a JSON array of YYYY-MM strings") from exc
+
+    if not isinstance(months, list) or not months:
+        raise ValueError("At least one month must be supplied in MONTHS_JSON")
+    if any(not isinstance(month, str) or not re.fullmatch(
+            r"[0-9]{4}-(0[1-9]|1[0-2])", month) for month in months):
+        raise ValueError("Each month must be a string in YYYY-MM format")
+    if len(months) != len(set(months)):
+        raise ValueError("MONTHS_JSON must not contain duplicate months")
+    return months
+
+
+MONTHS = parse_months(MONTHS_JSON)
+print("months to process:", MONTHS)
 
 # METADATA ********************
 
@@ -56,85 +64,115 @@ print(f"Quarantined records: {silver_quarantine.count():,}")
 
 # CELL ********************
 
-# Cell 2: Validate source data
+# Cell 1: Pre-flight audit check and load Silver source tables for MONTHS
 
-# Sensor metadata validation
-null_sensor_ids = silver_sensor.filter(
-    F.col("sensor_id").isNull()
-).count()
+from datetime import date, datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
+from pyspark.sql import functions as F
+from pyspark.sql.types import DateType, LongType, StructField, StructType
 
-duplicate_sensor_ids = (
-    silver_sensor
-    .groupBy("sensor_id")
-    .count()
-    .filter(F.col("count") > 1)
-    .count()
+AUDIT_TABLE = "lh_silver.dbo.silver_air_quality_quality_audit"
+SENSOR_TABLE = "lh_silver.dbo.silver_air_quality_sensor"
+HOURLY_TABLE = "lh_silver.dbo.silver_air_quality_hourly"
+QUARANTINE_TABLE = "lh_silver.dbo.silver_air_quality_quarantine"
+
+if not spark.catalog.tableExists(AUDIT_TABLE):
+    raise ValueError(f"Missing Silver audit table {AUDIT_TABLE}; refusing to publish Gold")
+
+audit_df = spark.table(AUDIT_TABLE).filter(F.col("local_year_month").isin(MONTHS))
+audit_by_month = {row["local_year_month"]: row for row in audit_df.collect()}
+missing_audit = sorted(set(MONTHS) - set(audit_by_month))
+failed_audit = sorted(
+    ym for ym, row in audit_by_month.items() if not row["reconciliation_passed"]
+)
+if missing_audit or failed_audit:
+    raise ValueError(
+        f"Air quality Silver audit check failed. Missing months: {missing_audit}; "
+        f"failed months: {failed_audit}. Refusing to publish Gold."
+    )
+
+silver_sensor = spark.read.table(SENSOR_TABLE)
+silver_hourly = (
+    spark.read.table(HOURLY_TABLE)
+    .filter(F.date_format("local_date", "yyyy-MM").isin(MONTHS))
+)
+silver_quarantine = (
+    spark.read.table(QUARANTINE_TABLE)
+    .filter(F.date_format("local_date", "yyyy-MM").isin(MONTHS))
 )
 
-# Accepted hourly records validation
+print(f"Silver sensors: {silver_sensor.count():,}")
+print(f"Accepted hourly records in MONTHS: {silver_hourly.count():,}")
+print(f"Quarantined records in MONTHS: {silver_quarantine.count():,}")
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+# Cell 2: Validate Silver source data for MONTHS
+
+null_sensor_ids = silver_sensor.filter(F.col("sensor_id").isNull()).count()
+duplicate_sensor_ids = (
+    silver_sensor.groupBy("sensor_id").count().filter(F.col("count") > 1).count()
+)
+
 invalid_hourly_records = silver_hourly.filter(
     F.col("sensor_id").isNull()
     | F.col("timestamp_utc").isNull()
     | F.col("local_date").isNull()
     | F.col("pm25_value").isNull()
+    | F.isnan(F.col("pm25_value"))
     | (F.col("pm25_value") < 0)
     | F.col("parameter").isNull()
     | (F.lower(F.trim(F.col("parameter"))) != "pm25")
     | F.col("unit").isNull()
     | (F.trim(F.col("unit")) != "µg/m³")
     | F.col("has_flags").isNull()
+    | (F.col("flag_status") != "CONFIRMED_UNFLAGGED")
 ).count()
 
 duplicate_hourly_records = (
-    silver_hourly
-    .groupBy("sensor_id", "timestamp_utc")
-    .count()
-    .filter(F.col("count") > 1)
-    .count()
+    silver_hourly.groupBy("sensor_id", "timestamp_utc").count().filter(F.col("count") > 1).count()
 )
 
-# Accepted records should not contain flagged observations
-accepted_flagged_records = silver_hourly.filter(
-    F.col("has_flags") == True
-).count()
+accepted_flagged_records = silver_hourly.filter(F.col("has_flags") != False).count()
 
-# Quarantine validation
 invalid_quarantine_records = silver_quarantine.filter(
     F.col("sensor_id").isNull()
     | F.col("timestamp_utc").isNull()
     | F.col("local_date").isNull()
     | F.col("quality_status").isNull()
-    | F.col("has_flags").isNull()
+    | F.col("flag_status").isNull()
+    | (~F.col("flag_status").isin("CONFIRMED_FLAGGED", "CONFIRMED_UNFLAGGED", "UNKNOWN_FLAG_STATUS"))
+    | ((F.col("flag_status") == "UNKNOWN_FLAG_STATUS") & F.col("has_flags").isNotNull())
+    | ((F.col("flag_status") != "UNKNOWN_FLAG_STATUS") & F.col("has_flags").isNull())
 ).count()
 
 duplicate_quarantine_records = (
-    silver_quarantine
-    .groupBy("sensor_id", "timestamp_utc")
-    .count()
-    .filter(F.col("count") > 1)
-    .count()
+    silver_quarantine.groupBy("sensor_id", "timestamp_utc").count().filter(F.col("count") > 1).count()
 )
 
+expected_quarantine_statuses = (
+    "FLAGGED",
+    "UNKNOWN_FLAG_STATUS",
+    "MISSING_VALUE",
+    "NEGATIVE_VALUE",
+    "UNEXPECTED_PARAMETER",
+    "UNEXPECTED_UNIT",
+    "UNEXPECTED_PERIOD",
+)
 unexpected_quarantine_statuses = (
-    silver_quarantine
-    .filter(
-        ~F.col("quality_status").isin(
-            "FLAGGED",
-            "MISSING_VALUE"
-        )
-    )
-    .count()
+    silver_quarantine.filter(~F.col("quality_status").isin(*expected_quarantine_statuses)).count()
 )
 
-# Accepted and quarantined records should not overlap
 overlapping_records = (
-    silver_hourly
-    .select("sensor_id", "timestamp_utc")
-    .join(
-        silver_quarantine.select("sensor_id", "timestamp_utc"),
-        on=["sensor_id", "timestamp_utc"],
-        how="inner"
-    )
+    silver_hourly.select("sensor_id", "timestamp_utc")
+    .join(silver_quarantine.select("sensor_id", "timestamp_utc"), on=["sensor_id", "timestamp_utc"], how="inner")
     .count()
 )
 
@@ -143,11 +181,11 @@ validation_results = {
     "Duplicate sensor IDs": duplicate_sensor_ids,
     "Invalid accepted records": invalid_hourly_records,
     "Duplicate accepted sensor-hours": duplicate_hourly_records,
-    "Flagged accepted records": accepted_flagged_records,
+    "Non-unflagged accepted records": accepted_flagged_records,
     "Invalid quarantined records": invalid_quarantine_records,
     "Duplicate quarantined sensor-hours": duplicate_quarantine_records,
     "Unexpected quarantine statuses": unexpected_quarantine_statuses,
-    "Overlapping accepted/quarantined records": overlapping_records
+    "Overlapping accepted/quarantined records": overlapping_records,
 }
 
 for name, count in validation_results.items():
@@ -155,8 +193,7 @@ for name, count in validation_results.items():
 
 if any(validation_results.values()):
     raise ValueError(
-        "Source validation failed. "
-        "Investigate the reported issues before proceeding."
+        "Source validation failed. Investigate the reported issues before proceeding."
     )
 
 print("All source validations passed.")
@@ -170,13 +207,12 @@ print("All source validations passed.")
 
 # CELL ********************
 
-# Cell 3: Create sensor dimension
+# Cell 3: Create / refresh static sensor dimension
 
 dim_air_quality_sensor = silver_sensor
 
 (
-    dim_air_quality_sensor
-    .write
+    dim_air_quality_sensor.write
     .format("delta")
     .mode("overwrite")
     .option("overwriteSchema", "true")
@@ -197,104 +233,54 @@ print(
 
 # CELL ********************
 
-# Cell 4: Aggregate accepted hourly measurements
+# Cell 4: Aggregate accepted and quarantined hourly measurements by sensor and date
 
 valid_daily = (
     silver_hourly
     .groupBy("sensor_id", "local_date")
     .agg(
-        F.countDistinct("timestamp_utc")
-        .alias("valid_hour_count"),
-
+        F.countDistinct("timestamp_utc").alias("valid_hour_count"),
         F.countDistinct(
-            F.when(
-                F.col("has_flags") == False,
-                F.col("timestamp_utc")
-            )
+            F.when(F.col("has_flags") == False, F.col("timestamp_utc"))
         ).alias("unflagged_hour_count"),
-
-        F.avg("pm25_value")
-        .alias("avg_pm25_all_valid"),
-
-        F.min("pm25_value")
-        .alias("min_pm25_all_valid"),
-
-        F.max("pm25_value")
-        .alias("max_pm25_all_valid"),
-
-        F.avg(
-            F.when(
-                F.col("has_flags") == False,
-                F.col("pm25_value")
-            )
-        ).alias("avg_pm25_unflagged"),
-
-        F.min(
-            F.when(
-                F.col("has_flags") == False,
-                F.col("pm25_value")
-            )
-        ).alias("min_pm25_unflagged"),
-
-        F.max(
-            F.when(
-                F.col("has_flags") == False,
-                F.col("pm25_value")
-            )
-        ).alias("max_pm25_unflagged"),
-
-        F.avg("source_hour_coverage_percent")
-        .alias("avg_source_hour_coverage_pct")
+        F.avg("pm25_value").alias("avg_pm25_all_valid"),
+        F.min("pm25_value").alias("min_pm25_all_valid"),
+        F.max("pm25_value").alias("max_pm25_all_valid"),
+        F.avg(F.when(F.col("has_flags") == False, F.col("pm25_value"))).alias("avg_pm25_unflagged"),
+        F.min(F.when(F.col("has_flags") == False, F.col("pm25_value"))).alias("min_pm25_unflagged"),
+        F.max(F.when(F.col("has_flags") == False, F.col("pm25_value"))).alias("max_pm25_unflagged"),
+        F.avg("source_hour_coverage_percent").alias("avg_source_hour_coverage_pct"),
     )
 )
-
-print(f"Accepted daily sensor groups: {valid_daily.count():,}")
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-# Cell 5: Aggregate quarantine quality metrics
 
 quarantine_daily = (
     silver_quarantine
     .groupBy("sensor_id", "local_date")
     .agg(
-        F.countDistinct("timestamp_utc")
-        .alias("quarantined_hour_count"),
-
+        F.countDistinct("timestamp_utc").alias("quarantined_hour_count"),
         F.countDistinct(
-            F.when(
-                F.col("has_flags") == True,
-                F.col("timestamp_utc")
-            )
+            F.when(F.col("has_flags") == True, F.col("timestamp_utc"))
         ).alias("flagged_hour_count"),
-
         F.countDistinct(
-            F.when(
-                F.col("quality_status") == "FLAGGED",
-                F.col("timestamp_utc")
-            )
+            F.when(F.col("quality_status") == "FLAGGED", F.col("timestamp_utc"))
         ).alias("flagged_value_hour_count"),
-
+        F.countDistinct(
+            F.when(F.col("quality_status") == "UNKNOWN_FLAG_STATUS", F.col("timestamp_utc"))
+        ).alias("unknown_flag_hour_count"),
+        F.countDistinct(
+            F.when(F.col("quality_status") == "MISSING_VALUE", F.col("timestamp_utc"))
+        ).alias("missing_value_hour_count"),
         F.countDistinct(
             F.when(
-                F.col("quality_status") == "MISSING_VALUE",
-                F.col("timestamp_utc")
+                ~F.col("quality_status").isin("FLAGGED", "UNKNOWN_FLAG_STATUS", "MISSING_VALUE"),
+                F.col("timestamp_utc"),
             )
-        ).alias("missing_value_hour_count")
+        ).alias("other_quarantined_hour_count"),
     )
 )
 
-print(
-    f"Quarantined daily sensor groups: "
-    f"{quarantine_daily.count():,}"
-)
+print(f"Accepted daily sensor groups:    {valid_daily.count():,}")
+print(f"Quarantined daily sensor groups: {quarantine_daily.count():,}")
 
 # METADATA ********************
 
@@ -305,145 +291,100 @@ print(
 
 # CELL ********************
 
-# Cell 6: Build daily sensor fact
+# Cell 5: Build complete calendar-date grid for MONTHS (preserving zero-measurement dates & DST hours)
 
-# Get the full date range from both Silver tables
-all_dates = (
-    silver_hourly
-    .select("local_date")
-    .unionByName(
-        silver_quarantine.select("local_date")
-    )
-    .distinct()
-)
+def next_month(ms):
+    y, m = int(ms[:4]), int(ms[5:7])
+    return f"{y + (m == 12)}-{(m % 12) + 1:02d}-01"
 
-date_bounds = all_dates.agg(
-    F.min("local_date").alias("min_date"),
-    F.max("local_date").alias("max_date")
-).first()
 
-min_date = date_bounds["min_date"]
-max_date = date_bounds["max_date"]
-
-if min_date is None or max_date is None:
-    raise ValueError("No local dates found in Silver data.")
-
-# Generate expected hours for each local date
 ny_timezone = ZoneInfo("America/New_York")
 utc_timezone = timezone.utc
 
 expected_hours = []
-current_date = min_date
+month_ranges = []
+for ym in sorted(MONTHS):
+    month_start = f"{ym}-01"
+    month_end = next_month(month_start)
+    start_d = date.fromisoformat(month_start)
+    end_d = date.fromisoformat(month_end)
+    month_ranges.append((ym, month_start, month_end))
 
-while current_date <= max_date:
-    start_local = datetime.combine(
-        current_date,
-        time.min,
-        tzinfo=ny_timezone
-    )
+    current_date = start_d
+    while current_date < end_d:
+        start_local = datetime.combine(current_date, time.min, tzinfo=ny_timezone)
+        end_local = datetime.combine(current_date + timedelta(days=1), time.min, tzinfo=ny_timezone)
+        hours = int(
+            (end_local.astimezone(utc_timezone) - start_local.astimezone(utc_timezone)).total_seconds() / 3600
+        )
+        expected_hours.append((current_date, hours))
+        current_date += timedelta(days=1)
 
-    end_local = datetime.combine(
-        current_date + timedelta(days=1),
-        time.min,
-        tzinfo=ny_timezone
-    )
+expected_hours_schema = StructType([
+    StructField("local_date", DateType(), False),
+    StructField("expected_hour_count", LongType(), False),
+])
+expected_hours_df = spark.createDataFrame(expected_hours, schema=expected_hours_schema)
 
-    hours = int(
-        (
-            end_local.astimezone(utc_timezone)
-            - start_local.astimezone(utc_timezone)
-        ).total_seconds() / 3600
-    )
-
-    expected_hours.append((current_date, hours))
-    current_date += timedelta(days=1)
-
-expected_hours_df = spark.createDataFrame(
-    expected_hours,
-    ["local_date", "expected_hour_count"]
-)
-
-# Create a complete sensor/date grid
-sensor_ids = (
-    dim_air_quality_sensor
-    .select("sensor_id")
-    .distinct()
-)
-
+sensor_ids = dim_air_quality_sensor.select("sensor_id").distinct()
 daily_grid = sensor_ids.crossJoin(expected_hours_df)
 
-# Join accepted and quarantined measurements
 fact_air_quality_daily_sensor = (
     daily_grid
-    .join(
-        valid_daily,
-        on=["sensor_id", "local_date"],
-        how="left"
-    )
-    .join(
-        quarantine_daily,
-        on=["sensor_id", "local_date"],
-        how="left"
-    )
+    .join(valid_daily, on=["sensor_id", "local_date"], how="left")
+    .join(quarantine_daily, on=["sensor_id", "local_date"], how="left")
 )
 
-# Fill missing count values with zero
 count_columns = [
     "valid_hour_count",
     "unflagged_hour_count",
     "quarantined_hour_count",
     "flagged_hour_count",
     "flagged_value_hour_count",
-    "missing_value_hour_count"
+    "unknown_flag_hour_count",
+    "missing_value_hour_count",
+    "other_quarantined_hour_count",
 ]
-
 for column in count_columns:
-    fact_air_quality_daily_sensor = (
-        fact_air_quality_daily_sensor
-        .withColumn(
-            column,
-            F.coalesce(F.col(column), F.lit(0)).cast("long")
-        )
+    fact_air_quality_daily_sensor = fact_air_quality_daily_sensor.withColumn(
+        column, F.coalesce(F.col(column), F.lit(0)).cast("long")
     )
 
-# Calculate coverage
 fact_air_quality_daily_sensor = (
     fact_air_quality_daily_sensor
     .withColumn(
         "source_observed_hour_count",
-        F.col("valid_hour_count")
-        + F.col("quarantined_hour_count")
+        F.col("valid_hour_count") + F.col("quarantined_hour_count"),
     )
     .withColumn(
         "hour_coverage_pct",
-        F.round(
-            F.col("valid_hour_count") * 100.0
-            / F.col("expected_hour_count"),
-            2
-        )
+        F.round(F.col("valid_hour_count") * 100.0 / F.col("expected_hour_count"), 2),
     )
     .withColumn(
         "unflagged_hour_coverage_pct",
-        F.round(
-            F.col("unflagged_hour_count") * 100.0
-            / F.col("expected_hour_count"),
-            2
-        )
+        F.round(F.col("unflagged_hour_count") * 100.0 / F.col("expected_hour_count"), 2),
     )
     .withColumn(
         "source_observed_hour_coverage_pct",
-        F.round(
-            F.col("source_observed_hour_count") * 100.0
-            / F.col("expected_hour_count"),
-            2
-        )
+        F.round(F.col("source_observed_hour_count") * 100.0 / F.col("expected_hour_count"), 2),
     )
 )
 
-print(
-    f"Daily sensor fact prepared: "
-    f"{fact_air_quality_daily_sensor.count():,} records"
-)
+SENSOR_DAILY_TABLE = "dbo.fact_air_quality_daily_sensor"
+for ym, month_start, month_end in month_ranges:
+    month_df = fact_air_quality_daily_sensor.filter(
+        (F.col("local_date") >= month_start) & (F.col("local_date") < month_end)
+    )
+    if spark.catalog.tableExists(SENSOR_DAILY_TABLE):
+        (
+            month_df.write.format("delta").mode("overwrite")
+            .option("replaceWhere", f"local_date >= '{month_start}' AND local_date < '{month_end}'")
+            .option("mergeSchema", "true")
+            .saveAsTable(SENSOR_DAILY_TABLE)
+        )
+    else:
+        month_df.write.format("delta").saveAsTable(SENSOR_DAILY_TABLE)
+    print(f"fact_air_quality_daily_sensor [{ym}]: saved")
 
 # METADATA ********************
 
@@ -454,131 +395,59 @@ print(
 
 # CELL ********************
 
-# Cell 7: Save daily sensor fact
+# Cell 6: Validate daily sensor Gold fact against Silver for MONTHS
 
-(
-    fact_air_quality_daily_sensor
-    .write
-    .format("delta")
-    .mode("overwrite")
-    .option("overwriteSchema", "true")
-    .saveAsTable("dbo.fact_air_quality_daily_sensor")
+gold_sensor = spark.read.table("dbo.dim_air_quality_sensor")
+gold_daily = (
+    spark.read.table("dbo.fact_air_quality_daily_sensor")
+    .filter(F.date_format("local_date", "yyyy-MM").isin(MONTHS))
 )
 
-print("fact_air_quality_daily_sensor saved successfully.")
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-# Cell 8: Validate Gold tables
-
-gold_sensor = spark.read.table(
-    "dbo.dim_air_quality_sensor"
-)
-
-gold_daily = spark.read.table(
-    "dbo.fact_air_quality_daily_sensor"
-)
-
-# Check expected number of sensor/date records
-expected_record_count = (
-    gold_sensor.select("sensor_id").distinct().count()
-    * len(expected_hours)
-)
-
+expected_record_count = gold_sensor.select("sensor_id").distinct().count() * len(expected_hours)
 actual_record_count = gold_daily.count()
-
 if actual_record_count != expected_record_count:
     raise ValueError(
-        f"Daily fact record count mismatch: "
-        f"expected {expected_record_count}, "
-        f"got {actual_record_count}."
+        f"Daily sensor fact record count mismatch for MONTHS: "
+        f"expected {expected_record_count}, got {actual_record_count}."
     )
 
-# Compare Gold totals against Silver source totals
+dup_sensor_dates = (
+    gold_daily.groupBy("sensor_id", "local_date").count().filter(F.col("count") > 1).count()
+)
+if dup_sensor_dates > 0:
+    raise ValueError(f"Found {dup_sensor_dates} duplicate sensor/date keys in daily sensor fact.")
+
 gold_totals = gold_daily.agg(
     F.sum("valid_hour_count").alias("valid_hours"),
     F.sum("quarantined_hour_count").alias("quarantined_hours"),
     F.sum("flagged_hour_count").alias("flagged_hours"),
     F.sum("flagged_value_hour_count").alias("flagged_value_hours"),
-    F.sum("missing_value_hour_count").alias("missing_value_hours")
+    F.sum("unknown_flag_hour_count").alias("unknown_flag_hours"),
+    F.sum("missing_value_hour_count").alias("missing_value_hours"),
 ).first()
 
 expected_totals = {
-    "valid_hours": silver_hourly.select(
-        "sensor_id", "timestamp_utc"
-    ).distinct().count(),
-
-    "quarantined_hours": silver_quarantine.select(
-        "sensor_id", "timestamp_utc"
-    ).distinct().count(),
-
-    "flagged_hours": silver_quarantine.filter(
-        F.col("has_flags") == True
-    ).select("sensor_id", "timestamp_utc").distinct().count(),
-
-    "flagged_value_hours": silver_quarantine.filter(
-        F.col("quality_status") == "FLAGGED"
-    ).select("sensor_id", "timestamp_utc").distinct().count(),
-
-    "missing_value_hours": silver_quarantine.filter(
-        F.col("quality_status") == "MISSING_VALUE"
-    ).select("sensor_id", "timestamp_utc").distinct().count()
+    "valid_hours": silver_hourly.select("sensor_id", "timestamp_utc").distinct().count(),
+    "quarantined_hours": silver_quarantine.select("sensor_id", "timestamp_utc").distinct().count(),
+    "flagged_hours": silver_quarantine.filter(F.col("has_flags") == True)
+    .select("sensor_id", "timestamp_utc").distinct().count(),
+    "flagged_value_hours": silver_quarantine.filter(F.col("quality_status") == "FLAGGED")
+    .select("sensor_id", "timestamp_utc").distinct().count(),
+    "unknown_flag_hours": silver_quarantine.filter(F.col("quality_status") == "UNKNOWN_FLAG_STATUS")
+    .select("sensor_id", "timestamp_utc").distinct().count(),
+    "missing_value_hours": silver_quarantine.filter(F.col("quality_status") == "MISSING_VALUE")
+    .select("sensor_id", "timestamp_utc").distinct().count(),
 }
 
 for metric, expected in expected_totals.items():
     actual = gold_totals[metric]
-
     print(f"{metric}: Gold={actual:,}, Silver={expected:,}")
-
     if actual != expected:
-        raise ValueError(
-            f"{metric} mismatch: Gold={actual}, Silver={expected}"
-        )
+        raise ValueError(f"{metric} mismatch: Gold={actual}, Silver={expected}")
 
-print("\nGold validation passed.")
-
-# Overall table statistics
-print(f"\nGold sensor records: {gold_sensor.count():,}")
-print(f"Gold daily fact records: {actual_record_count:,}")
-
-gold_daily.agg(
-    F.countDistinct("sensor_id").alias("unique_sensors"),
-    F.countDistinct("local_date").alias("unique_dates"),
-    F.min("local_date").alias("first_date"),
-    F.max("local_date").alias("last_date")
-).show(truncate=False)
-
-# Quality metrics by sensor
+print("\nSensor-level Gold validation passed for MONTHS.")
 display(
-    gold_daily
-    .groupBy("sensor_id")
-    .agg(
-        F.sum("valid_hour_count").alias("valid_hours"),
-        F.sum("quarantined_hour_count").alias("quarantined_hours"),
-        F.sum("flagged_hour_count").alias("flagged_hours"),
-        F.sum("flagged_value_hour_count").alias("flagged_value_hours"),
-        F.sum("missing_value_hour_count").alias("missing_value_hours"),
-        F.round(
-            F.avg("hour_coverage_pct"), 2
-        ).alias("avg_valid_coverage_pct"),
-        F.round(
-            F.avg("source_observed_hour_coverage_pct"), 2
-        ).alias("avg_source_observed_coverage_pct")
-    )
-    .orderBy("sensor_id")
-)
-
-# Check DST dates
-display(
-    gold_daily
-    .select("local_date", "expected_hour_count")
+    gold_daily.select("local_date", "expected_hour_count")
     .distinct()
     .filter(F.col("expected_hour_count") != 24)
     .orderBy("local_date")
@@ -593,198 +462,78 @@ display(
 
 # CELL ********************
 
-# Cell 9: Load and validate sensor-level Gold data
+# Cell 7: Build citywide daily monitoring-network estimate for MONTHS and write month-scoped
 
-from pyspark.sql import functions as F
-
-sensor_daily = spark.read.table(
-    "dbo.fact_air_quality_daily_sensor"
-)
-
-# Configurable aggregation criteria
 MIN_SENSOR_COVERAGE_PCT = 75.0
 MIN_ELIGIBLE_SENSORS = 4
 
-# Check required columns
-required_columns = {
-    "sensor_id",
-    "local_date",
-    "hour_coverage_pct"
-}
-
-missing_columns = required_columns - set(sensor_daily.columns)
-
-if missing_columns:
-    raise ValueError(
-        f"Missing required columns: {sorted(missing_columns)}"
-    )
-
-# Identify the accepted PM2.5 daily average column
-if "avg_pm25_unflagged" in sensor_daily.columns:
-    PM25_COLUMN = "avg_pm25_unflagged"
-elif "avg_pm25_all_valid" in sensor_daily.columns:
-    PM25_COLUMN = "avg_pm25_all_valid"
-else:
-    raise ValueError(
-        "Could not find the daily PM2.5 average column."
-    )
-
-# Ensure each sensor has at most one record per date
-duplicates = (
-    sensor_daily
-    .groupBy("sensor_id", "local_date")
-    .count()
-    .filter(F.col("count") > 1)
-    .count()
+sensor_daily = (
+    spark.read.table("dbo.fact_air_quality_daily_sensor")
+    .filter(F.date_format("local_date", "yyyy-MM").isin(MONTHS))
 )
 
-if duplicates > 0:
-    raise ValueError(
-        f"Found {duplicates} duplicate sensor/date records."
-    )
+PM25_COLUMN = "avg_pm25_unflagged"
 
-print("Source validation passed.")
-print(f"PM2.5 column: {PM25_COLUMN}")
-print(f"Coverage threshold: {MIN_SENSOR_COVERAGE_PCT}%")
-print(f"Minimum eligible sensors: {MIN_ELIGIBLE_SENSORS}")
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-# Cell 10: Calculate daily network metrics
-
-# Determine whether each sensor's daily reading is eligible
-sensor_daily_scored = (
-    sensor_daily
-    .withColumn(
-        "is_eligible",
-        (
-            (F.col("hour_coverage_pct") >= MIN_SENSOR_COVERAGE_PCT)
-            & F.col(PM25_COLUMN).isNotNull()
-        )
-    )
+sensor_daily_scored = sensor_daily.withColumn(
+    "is_eligible",
+    (F.col("hour_coverage_pct") >= MIN_SENSOR_COVERAGE_PCT) & F.col(PM25_COLUMN).isNotNull(),
 )
 
-# Aggregate eligible sensor daily averages
 network_metrics = (
     sensor_daily_scored
     .groupBy("local_date")
     .agg(
         F.countDistinct(
-            F.when(
-                F.col(PM25_COLUMN).isNotNull(),
-                F.col("sensor_id")
-            )
+            F.when(F.col(PM25_COLUMN).isNotNull(), F.col("sensor_id"))
         ).alias("available_sensor_count"),
-
         F.countDistinct(
-            F.when(
-                F.col("is_eligible"),
-                F.col("sensor_id")
-            )
+            F.when(F.col("is_eligible"), F.col("sensor_id"))
         ).alias("eligible_sensor_count"),
-
-        F.avg(
-            F.when(
-                F.col("is_eligible"),
-                F.col(PM25_COLUMN)
-            )
-        ).alias("candidate_network_mean_pm25"),
-
+        F.avg(F.when(F.col("is_eligible"), F.col(PM25_COLUMN))).alias("candidate_network_mean_pm25"),
         F.percentile_approx(
-            F.when(
-                F.col("is_eligible"),
-                F.col(PM25_COLUMN)
-            ),
-            0.5,
-            10000
+            F.when(F.col("is_eligible"), F.col(PM25_COLUMN)), 0.5, 10000
         ).alias("candidate_network_median_pm25"),
-
-        F.min(
-            F.when(
-                F.col("is_eligible"),
-                F.col(PM25_COLUMN)
-            )
-        ).alias("min_sensor_avg_pm25"),
-
-        F.max(
-            F.when(
-                F.col("is_eligible"),
-                F.col(PM25_COLUMN)
-            )
-        ).alias("max_sensor_avg_pm25"),
-
-        F.avg(
-            F.when(
-                F.col("is_eligible"),
-                F.col("hour_coverage_pct")
-            )
-        ).alias("avg_eligible_sensor_coverage_pct")
+        F.min(F.when(F.col("is_eligible"), F.col(PM25_COLUMN))).alias("min_sensor_avg_pm25"),
+        F.max(F.when(F.col("is_eligible"), F.col(PM25_COLUMN))).alias("max_sensor_avg_pm25"),
+        F.avg(F.when(F.col("is_eligible"), F.col("hour_coverage_pct"))).alias("avg_eligible_sensor_coverage_pct"),
     )
 )
 
-# Preserve every date from the sensor-level fact
-date_spine = (
-    sensor_daily
-    .select("local_date")
-    .distinct()
-)
+date_spine = sensor_daily.select("local_date").distinct()
 
 fact_air_quality_daily_citywide = (
     date_spine
-    .join(
-        network_metrics,
-        on="local_date",
-        how="left"
-    )
-)
-
-# Require a minimum number of eligible sensors
-fact_air_quality_daily_citywide = (
-    fact_air_quality_daily_citywide
+    .join(network_metrics, on="local_date", how="left")
+    .withColumn("available_sensor_count", F.coalesce(F.col("available_sensor_count"), F.lit(0)).cast("long"))
+    .withColumn("eligible_sensor_count", F.coalesce(F.col("eligible_sensor_count"), F.lit(0)).cast("long"))
     .withColumn(
         "network_mean_pm25",
-        F.when(
-            F.col("eligible_sensor_count") >= MIN_ELIGIBLE_SENSORS,
-            F.col("candidate_network_mean_pm25")
-        )
+        F.when(F.col("eligible_sensor_count") >= MIN_ELIGIBLE_SENSORS, F.col("candidate_network_mean_pm25")),
     )
     .withColumn(
         "network_median_pm25",
-        F.when(
-            F.col("eligible_sensor_count") >= MIN_ELIGIBLE_SENSORS,
-            F.col("candidate_network_median_pm25")
+        F.when(F.col("eligible_sensor_count") >= MIN_ELIGIBLE_SENSORS, F.col("candidate_network_median_pm25")),
+    )
+    .withColumn("minimum_sensor_coverage_pct", F.lit(MIN_SENSOR_COVERAGE_PCT))
+    .withColumn("minimum_eligible_sensor_count", F.lit(MIN_ELIGIBLE_SENSORS))
+    .drop("candidate_network_mean_pm25", "candidate_network_median_pm25")
+)
+
+CITYWIDE_TABLE = "dbo.fact_air_quality_daily_citywide"
+for ym, month_start, month_end in month_ranges:
+    month_df = fact_air_quality_daily_citywide.filter(
+        (F.col("local_date") >= month_start) & (F.col("local_date") < month_end)
+    )
+    if spark.catalog.tableExists(CITYWIDE_TABLE):
+        (
+            month_df.write.format("delta").mode("overwrite")
+            .option("replaceWhere", f"local_date >= '{month_start}' AND local_date < '{month_end}'")
+            .option("mergeSchema", "true")
+            .saveAsTable(CITYWIDE_TABLE)
         )
-    )
-    .withColumn(
-        "minimum_sensor_coverage_pct",
-        F.lit(MIN_SENSOR_COVERAGE_PCT)
-    )
-    .withColumn(
-        "minimum_eligible_sensor_count",
-        F.lit(MIN_ELIGIBLE_SENSORS)
-    )
-    .drop(
-        "candidate_network_mean_pm25",
-        "candidate_network_median_pm25"
-    )
-)
-
-print(
-    "Daily network records:",
-    fact_air_quality_daily_citywide.count()
-)
-
-display(
-    fact_air_quality_daily_citywide
-    .orderBy("local_date")
-)
+    else:
+        month_df.write.format("delta").saveAsTable(CITYWIDE_TABLE)
+    print(f"fact_air_quality_daily_citywide [{ym}]: saved")
 
 # METADATA ********************
 
@@ -795,185 +544,43 @@ display(
 
 # CELL ********************
 
-# Cell 11: Save and validate the citywide fact
+# Cell 8: Validate citywide Gold fact for MONTHS
 
-# Save the citywide daily air-quality fact
-(
-    fact_air_quality_daily_citywide
-    .write
-    .format("delta")
-    .mode("overwrite")
-    .option("overwriteSchema", "true")
-    .saveAsTable("dbo.fact_air_quality_daily_citywide")
+gold_citywide = (
+    spark.read.table("dbo.fact_air_quality_daily_citywide")
+    .filter(F.date_format("local_date", "yyyy-MM").isin(MONTHS))
 )
 
-# Reload the saved table
-gold_citywide = spark.read.table(
-    "dbo.fact_air_quality_daily_citywide"
-)
-
-# Validate the date grain
 duplicate_dates = (
-    gold_citywide
-    .groupBy("local_date")
-    .count()
-    .filter(F.col("count") > 1)
-    .count()
+    gold_citywide.groupBy("local_date").count().filter(F.col("count") > 1).count()
 )
-
 if duplicate_dates > 0:
+    raise ValueError("Citywide fact contains duplicate dates.")
+
+citywide_count = gold_citywide.count()
+if citywide_count != len(expected_hours):
     raise ValueError(
-        "Citywide fact contains duplicate dates."
+        f"Citywide date count mismatch for MONTHS: expected {len(expected_hours)}, got {citywide_count}."
     )
 
-# Display overall statistics
+invalid_estimates = gold_citywide.filter(
+    (F.col("eligible_sensor_count") < MIN_ELIGIBLE_SENSORS) & F.col("network_mean_pm25").isNotNull()
+).count()
+if invalid_estimates > 0:
+    raise ValueError(
+        f"Found {invalid_estimates} days with < {MIN_ELIGIBLE_SENSORS} eligible sensors having non-null PM2.5 estimate."
+    )
+
 gold_citywide.agg(
     F.count("*").alias("total_dates"),
     F.min("local_date").alias("first_date"),
     F.max("local_date").alias("last_date"),
-    F.sum(
-        F.when(
-            F.col("network_mean_pm25").isNotNull(),
-            1
-        ).otherwise(0)
-    ).alias("dates_with_network_estimate"),
+    F.sum(F.when(F.col("network_mean_pm25").isNotNull(), 1).otherwise(0)).alias("dates_with_network_estimate"),
     F.min("eligible_sensor_count").alias("minimum_eligible_sensors"),
-    F.max("eligible_sensor_count").alias("maximum_eligible_sensors")
+    F.max("eligible_sensor_count").alias("maximum_eligible_sensors"),
 ).show(truncate=False)
 
-# Inspect dates with insufficient monitoring coverage
-display(
-    gold_citywide
-    .filter(
-        F.col("eligible_sensor_count") < MIN_ELIGIBLE_SENSORS
-    )
-    .orderBy("local_date")
-)
-
-print("Citywide daily air-quality fact validated.")
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-from pyspark.sql import functions as F
-
-# Load the existing Gold tables
-taxi = spark.table("dbo.fact_taxi_daily")
-date_dim = spark.table("dbo.dim_date")
-air_quality = spark.table("dbo.fact_air_quality_daily_citywide")
-
-# Map the air-quality local date to the shared date key
-air_quality_with_key = (
-    air_quality.alias("aq")
-    .join(
-        date_dim.select("date_key", "full_date").alias("d"),
-        F.col("aq.local_date") == F.col("d.full_date"),
-        "inner"
-    )
-    .select(
-        F.col("d.date_key"),
-        F.col("aq.available_sensor_count"),
-        F.col("aq.eligible_sensor_count"),
-        F.col("aq.min_sensor_avg_pm25"),
-        F.col("aq.max_sensor_avg_pm25"),
-        F.col("aq.avg_eligible_sensor_coverage_pct"),
-        F.col("aq.network_mean_pm25"),
-        F.col("aq.network_median_pm25"),
-        F.col("aq.minimum_sensor_coverage_pct"),
-        F.col("aq.minimum_eligible_sensor_count")
-    )
-)
-
-# Preserve every taxi date and attach matching air-quality metrics
-fact_taxi_air_quality = (
-    taxi.alias("t")
-    .join(
-        air_quality_with_key.alias("aq"),
-        on="date_key",
-        how="left"
-    )
-)
-
-# Write the combined Gold fact table
-(
-    fact_taxi_air_quality.write
-    .format("delta")
-    .mode("overwrite")
-    .option("overwriteSchema", "true")
-    .saveAsTable("dbo.fact_taxi_air_quality_daily")
-)
-
-print("Created dbo.fact_taxi_air_quality_daily")
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-from pyspark.sql import functions as F
-
-taxi = spark.table("dbo.fact_taxi_daily")
-combined = spark.table("dbo.fact_taxi_air_quality_daily")
-
-taxi_count = taxi.count()
-combined_count = combined.count()
-
-duplicate_dates = (
-    combined.groupBy("date_key")
-    .count()
-    .filter(F.col("count") > 1)
-    .count()
-)
-
-with_air_quality = combined.filter(
-    F.col("network_mean_pm25").isNotNull()
-).count()
-
-without_air_quality = combined.filter(
-    F.col("network_mean_pm25").isNull()
-).count()
-
-print(f"Taxi fact rows:             {taxi_count}")
-print(f"Combined fact rows:         {combined_count}")
-print(f"Duplicate date keys:        {duplicate_dates}")
-print(f"Dates with air quality:     {with_air_quality}")
-print(f"Dates without air quality:  {without_air_quality}")
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-display(
-    spark.table("dbo.fact_taxi_air_quality_daily")
-    .select(
-        "date_key",
-        "trip_count",
-        "total_amount_usd",
-        "avg_distance_miles",
-        "available_sensor_count",
-        "eligible_sensor_count",
-        "avg_eligible_sensor_coverage_pct",
-        "network_mean_pm25",
-        "network_median_pm25"
-    )
-    .orderBy("date_key")
-    .limit(30)
-)
+print("ALL CHECKS PASSED")
 
 # METADATA ********************
 
