@@ -209,6 +209,15 @@ aq_citywide_m = {
     .agg(F.count("*").alias("days"))
     .collect()
 }
+aq_hourly_cw_m = {
+    r["ym"]: r
+    for r in spark.table("dbo.fact_air_quality_hourly_citywide")
+    .withColumn("ym", F.date_format("local_date", "yyyy-MM"))
+    .filter(F.col("ym").isin(MONTHS))
+    .groupBy("ym")
+    .agg(F.count("*").alias("hours"), F.countDistinct("local_date").alias("days"))
+    .collect()
+}
 
 for ym in MONTHS:
     err = []
@@ -216,6 +225,7 @@ for ym in MONTHS:
     sa = aq_silver_audit.get(ym)
     ds = aq_daily_sensor_m.get(ym)
     cw = aq_citywide_m.get(ym)
+    hcw = aq_hourly_cw_m.get(ym)
     if ba is not None:
         if ba["sensor_rows"] < aq_sensor_count or ba["failed_sensors"] > 0:
             err.append(f"OpenAQ Bronze sensor audit incomplete/failed: {ba}")
@@ -229,6 +239,8 @@ for ym in MONTHS:
         err.append("Gold air quality hours do not match Silver accepted/quarantined counts")
     elif cw is None or cw["days"] != expected_days_by_month[ym]:
         err.append(f"Gold citywide date count mismatch for {ym}")
+    elif hcw is None or hcw["days"] != expected_days_by_month[ym]:
+        err.append(f"Gold hourly citywide date coverage mismatch for {ym}")
     if err:
         problems.append(f"OPENAQ [{ym}]: " + "; ".join(err))
     log_entries.append({

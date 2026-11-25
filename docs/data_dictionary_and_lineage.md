@@ -6,7 +6,7 @@
 | --- | --- | --- | --- |
 | NYC TLC Yellow Taxi Parquet (`yellow_tripdata_YYYY-MM.parquet`) | `Files/taxi/yellow_tripdata_YYYY-MM.parquet` | `silver_taxi`, `silver_taxi_quarantine`, `silver_taxi_quality_audit` | `dim_date`, `fact_taxi_daily`, `fact_taxi_hourly_zone`, `fact_taxi_air_quality_daily` |
 | NYC TLC Taxi Zone Lookup CSV (`taxi_zone_lookup.csv`) | `Files/taxi/taxi_zone_lookup.csv` | *(Validated directly into Gold)* | `dim_taxi_zone` |
-| OpenAQ v3 API (`/sensors/{id}/hours`, `/sensors/{id}`, `/locations`, `/sensors/{id}/flags`) | `Files/air_quality/openaq/raw/...` + `bronze_openaq_hourly`, `bronze_openaq_sensor`, `bronze_openaq_location`, `bronze_openaq_flags`, `bronze_openaq_ingest_audit` | `silver_air_quality_hourly`, `silver_air_quality_quarantine`, `silver_air_quality_sensor`, `silver_air_quality_flags`, `silver_air_quality_quality_audit` | `dim_air_quality_sensor`, `fact_air_quality_daily_sensor`, `fact_air_quality_daily_citywide`, `fact_taxi_air_quality_daily` |
+| OpenAQ v3 API (`/sensors/{id}/hours`, `/sensors/{id}`, `/locations`, `/sensors/{id}/flags`) | `Files/air_quality/openaq/raw/...` + `bronze_openaq_hourly`, `bronze_openaq_sensor`, `bronze_openaq_location`, `bronze_openaq_flags`, `bronze_openaq_ingest_audit` | `silver_air_quality_hourly`, `silver_air_quality_quarantine`, `silver_air_quality_sensor`, `silver_air_quality_flags`, `silver_air_quality_quality_audit` | `dim_air_quality_sensor`, `fact_air_quality_daily_sensor`, `fact_air_quality_daily_citywide`, `fact_air_quality_hourly_citywide`, `fact_taxi_air_quality_daily` |
 | World Bank v2 API (`NY.GDP.MKTP.CD`) | `Files/economics/world_bank/raw/...` + `bronze_world_bank_gdp`, `bronze_world_bank_ingest_audit` | `silver_world_bank_gdp`, `silver_world_bank_gdp_quarantine`, `silver_economics_quality_audit` | `dim_country`, `fact_gdp_annual` |
 | ECB Data API (`EXR/D.USD.EUR.SP00.A`) | `Files/economics/ecb_fx/raw/...` + `bronze_ecb_fx`, `bronze_ecb_fx_ingest_audit` | `silver_ecb_fx`, `silver_ecb_fx_quarantine`, `silver_economics_quality_audit` | `dim_currency`, `fact_fx_daily`, `vw_taxi_revenue_usd_eur_daily` |
 | Pipeline Execution & Validation | — | — | `etl_run_log` |
@@ -53,6 +53,7 @@
 | `fact_taxi_hourly_zone` | Day + hour + zone | `(date_key, pickup_hour, PULocationID)` | Maps missing `PULocationID` to `-1`; reconciles to `fact_taxi_daily` |
 | `fact_air_quality_daily_sensor` | Sensor + local date | `(sensor_id, local_date)` | Complete `8 × days` grid; DST-aware `expected_hour_count` (`23`/`24`/`25`) |
 | `fact_air_quality_daily_citywide` | Local date | `local_date` | Network mean/median PM2.5 (`NULL` if `< 4` eligible sensors at `>= 75%` coverage) |
+| `fact_air_quality_hourly_citywide` | Local date + local hour | `(local_date, local_hour)` | Complete DST-aware hourly grid; `hourly_network_mean_pm25` is `NULL` when `< 4` sensors report valid unflagged PM2.5 |
 | `fact_taxi_air_quality_daily` | Calendar day | `date_key` | Left join of `fact_taxi_daily` + `fact_air_quality_daily_citywide` |
 | `fact_fx_daily` | Day + currency pair | `(date_key, currency_pair)` | Explicit `ECB_LAST_BUSINESS_DAY_CARRY_FORWARD` with `rate_observation_date` |
 | `fact_gdp_annual` | Country + year | `(country_iso3, year)` | Annual numeric GDP (`NY.GDP.MKTP.CD`) |

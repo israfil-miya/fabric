@@ -100,7 +100,7 @@ flowchart LR
 | Air Quality Silver | Tri-state `flag_status`, multi-reason quarantine, 11-sensor audit, month-scoped writes | [nb_build_silver_air_quality](nb_build_silver_air_quality.Notebook/notebook-content.py) |
 | Economics Silver | Cleans, classifies, and reconciles World Bank GDP and ECB FX | [nb_build_silver_economics](nb_build_silver_economics.Notebook/notebook-content.py) |
 | Taxi Gold | Builds `dim_date`, `dim_taxi_zone`, `fact_taxi_daily`, and `fact_taxi_hourly_zone` | [nb_taxi_gold](nb_taxi_gold.Notebook/notebook-content.py) |
-| Air Quality Gold | Builds `dim_air_quality_sensor`, DST-aware `fact_air_quality_daily_sensor`, and citywide fact | [nb_air_quality_gold](nb_air_quality_gold.Notebook/notebook-content.py) |
+| Air Quality Gold | Builds `dim_air_quality_sensor`, DST-aware `fact_air_quality_daily_sensor`, daily & hourly citywide facts | [nb_air_quality_gold](nb_air_quality_gold.Notebook/notebook-content.py) |
 | Economics Gold | Builds `dim_currency`, `dim_country`, `fact_gdp_annual`, and carry-forward `fact_fx_daily` | [nb_economics_gold](nb_economics_gold.Notebook/notebook-content.py) |
 | Combined Gold | Month-scoped left join of `fact_taxi_daily` and `fact_air_quality_daily_citywide` | [nb_taxi_air_quality_gold](nb_taxi_air_quality_gold.Notebook/notebook-content.py) |
 | Final Validation & Logging | Reconciles all layers and writes `lh_gold.dbo.etl_run_log` | [nb_validate_pipeline_run](nb_validate_pipeline_run.Notebook/notebook-content.py) |

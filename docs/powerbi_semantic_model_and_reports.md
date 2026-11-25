@@ -10,6 +10,7 @@ erDiagram
     dim_date ||--o{ fact_taxi_hourly_zone : "date_key"
     dim_date ||--o{ fact_air_quality_daily_sensor : "date_key"
     dim_date ||--o{ fact_air_quality_daily_citywide : "date_key"
+    dim_date ||--o{ fact_air_quality_hourly_citywide : "date_key"
     dim_date ||--o{ fact_taxi_air_quality_daily : "date_key"
     dim_date ||--o{ fact_fx_daily : "date_key"
 
@@ -124,7 +125,7 @@ OpenAQ Unknown Flag Hours = SUM(vw_audit_air_quality[unknown_flag_status_count])
 | --- | --- | --- |
 | **1. Mobility** | `fact_taxi_daily`, `fact_taxi_hourly_zone`, `dim_taxi_zone`, `dim_date` | KPI cards (`Total Recorded Trips`, `Gross Nonnegative Revenue (USD)`, `Signed Net Revenue (USD)`, `Avg Reported Distance`, `Zero-Distance Trip %`); daily trip & revenue trend; borough/zone bar chart; `pickup_hour` × `day_name` demand heatmap; zero-distance drilldown table. |
 | **2. Air Quality** | `fact_air_quality_daily_citywide`, `fact_air_quality_daily_sensor`, `dim_air_quality_sensor`, `dim_date` | KPI cards (`Network Mean PM2.5`, `Days With Reliable PM2.5 Estimate`, `Sensor Valid Hour Coverage %`); daily PM2.5 line chart with min/max sensor band; sensor completeness matrix; quarantined/flagged hours by sensor. Explicit subtitle: *"Selected 8-monitor AirNow network estimate (≥75% coverage, ≥4 sensors)."* |
-| **3. Mobility vs Air Quality** | `fact_taxi_air_quality_daily`, `fact_taxi_hourly_zone`, `dim_date` | Dual-axis daily trips vs. `network_mean_pm25` time series; scatter plot (daily `trip_count` vs. `network_mean_pm25`, colored by weekend/weekday); peak-hour demand profile alongside air-quality days. Includes explicit disclaimer that 8 monitors do not support zone-level PM2.5 causality. |
+| **3. Mobility vs Air Quality** | `fact_taxi_air_quality_daily`, `fact_taxi_hourly_zone`, `fact_air_quality_hourly_citywide`, `dim_date` | Dual-axis daily trips vs. `network_mean_pm25` time series; scatter plot (daily `trip_count` vs. `network_mean_pm25`, colored by weekend/weekday); hour-of-day profile comparing `fact_taxi_hourly_zone[pickup_hour]` trips against `fact_air_quality_hourly_citywide[local_hour]` PM2.5. Includes explicit disclaimer that 8 monitors do not support zone-level PM2.5 causality. |
 | **4. Economic** | `vw_taxi_revenue_usd_eur_daily`, `fact_fx_daily`, `fact_gdp_annual`, `dim_country`, `dim_currency` | Daily USD vs. EUR taxi revenue comparison; ECB `USD per 1 EUR` rate trend highlighting carry-forward weekend/holiday dates (`is_carry_forward_rate`); annual `fact_gdp_annual` comparison (`USA` vs. `EMU`). |
 | **5. Data Quality** | `vw_audit_taxi_quality`, `vw_audit_air_quality`, `vw_audit_economics`, `vw_etl_run_log` | Reconciliation status cards (`diff = 0` check across all sources); monthly Taxi quarantine & anomaly breakdown (`dropoff_before_pickup`, `out_of_month`, negative amounts by context, >100 mi, >8h); OpenAQ quarantine & multi-reason flags; `vw_etl_run_log` latest run table. |
 

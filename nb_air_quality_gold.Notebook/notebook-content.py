@@ -78,7 +78,7 @@ print("months to process:", MONTHS)
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 from pyspark.sql import functions as F
-from pyspark.sql.types import DateType, LongType, StructField, StructType
+from pyspark.sql.types import DateType, IntegerType, LongType, StructField, StructType
 
 AUDIT_TABLE = "lh_silver.dbo.silver_air_quality_quality_audit"
 SENSOR_TABLE = "lh_silver.dbo.silver_air_quality_sensor"
@@ -587,6 +587,125 @@ gold_citywide.agg(
     F.sum(F.when(F.col("network_mean_pm25").isNotNull(), 1).otherwise(0)).alias("dates_with_network_estimate"),
     F.min("eligible_sensor_count").alias("minimum_eligible_sensors"),
     F.max("eligible_sensor_count").alias("maximum_eligible_sensors"),
+).show(truncate=False)
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+# Cell 9: Build and validate citywide hourly monitoring-network estimate (fact_air_quality_hourly_citywide)
+
+from collections import Counter
+
+# Build exact DST-aware local hour slots (local_date, local_hour) from UTC hours in MONTHS.
+hour_slot_counts = Counter()
+for ym, month_start, month_end in month_ranges:
+    start_local = datetime.combine(date.fromisoformat(month_start), time.min, tzinfo=ny_timezone)
+    end_local = datetime.combine(date.fromisoformat(month_end), time.min, tzinfo=ny_timezone)
+    cur_utc = start_local.astimezone(utc_timezone)
+    end_utc = end_local.astimezone(utc_timezone)
+    while cur_utc < end_utc:
+        loc_dt = cur_utc.astimezone(ny_timezone)
+        hour_slot_counts[(loc_dt.date(), loc_dt.hour)] += 1
+        cur_utc += timedelta(hours=1)
+
+hourly_grid_rows = [
+    (int(d.strftime("%Y%m%d")), d, int(h), int(cnt))
+    for (d, h), cnt in sorted(hour_slot_counts.items())
+]
+hourly_grid_schema = StructType([
+    StructField("date_key", IntegerType(), False),
+    StructField("local_date", DateType(), False),
+    StructField("local_hour", IntegerType(), False),
+    StructField("expected_utc_hours", LongType(), False),
+])
+hourly_grid_df = spark.createDataFrame(hourly_grid_rows, schema=hourly_grid_schema)
+
+# Aggregate per (local_date, local_hour, sensor_id) first so DST fall-back double hours give 1 vote per sensor.
+sensor_hourly_pm25 = (
+    silver_hourly
+    .groupBy("local_date", F.col("local_hour").cast("int").alias("local_hour"), "sensor_id")
+    .agg(F.avg("pm25_value").alias("sensor_pm25"))
+)
+
+hourly_network_metrics = (
+    sensor_hourly_pm25
+    .groupBy("local_date", "local_hour")
+    .agg(
+        F.countDistinct("sensor_id").alias("available_sensor_count"),
+        F.avg("sensor_pm25").alias("candidate_hourly_mean_pm25"),
+        F.percentile_approx("sensor_pm25", 0.5, 10000).alias("candidate_hourly_median_pm25"),
+        F.min("sensor_pm25").alias("min_sensor_pm25"),
+        F.max("sensor_pm25").alias("max_sensor_pm25"),
+    )
+)
+
+fact_air_quality_hourly_citywide = (
+    hourly_grid_df
+    .join(hourly_network_metrics, on=["local_date", "local_hour"], how="left")
+    .withColumn("available_sensor_count", F.coalesce(F.col("available_sensor_count"), F.lit(0)).cast("long"))
+    .withColumn(
+        "hourly_network_mean_pm25",
+        F.when(F.col("available_sensor_count") >= MIN_ELIGIBLE_SENSORS, F.col("candidate_hourly_mean_pm25")),
+    )
+    .withColumn(
+        "hourly_network_median_pm25",
+        F.when(F.col("available_sensor_count") >= MIN_ELIGIBLE_SENSORS, F.col("candidate_hourly_median_pm25")),
+    )
+    .withColumn("minimum_eligible_sensor_count", F.lit(MIN_ELIGIBLE_SENSORS).cast("int"))
+    .drop("candidate_hourly_mean_pm25", "candidate_hourly_median_pm25")
+)
+
+HOURLY_CITYWIDE_TABLE = "dbo.fact_air_quality_hourly_citywide"
+for ym, month_start, month_end in month_ranges:
+    month_df = fact_air_quality_hourly_citywide.filter(
+        (F.col("local_date") >= month_start) & (F.col("local_date") < month_end)
+    )
+    if spark.catalog.tableExists(HOURLY_CITYWIDE_TABLE):
+        (
+            month_df.write.format("delta").mode("overwrite")
+            .option("replaceWhere", f"local_date >= '{month_start}' AND local_date < '{month_end}'")
+            .option("mergeSchema", "true")
+            .saveAsTable(HOURLY_CITYWIDE_TABLE)
+        )
+    else:
+        month_df.write.format("delta").saveAsTable(HOURLY_CITYWIDE_TABLE)
+    print(f"fact_air_quality_hourly_citywide [{ym}]: saved")
+
+gold_hourly_cw = (
+    spark.read.table(HOURLY_CITYWIDE_TABLE)
+    .filter(F.date_format("local_date", "yyyy-MM").isin(MONTHS))
+)
+dup_hourly_cw = (
+    gold_hourly_cw.groupBy("local_date", "local_hour").count().filter(F.col("count") > 1).count()
+)
+if dup_hourly_cw > 0:
+    raise ValueError(f"Found {dup_hourly_cw} duplicate (local_date, local_hour) rows in hourly citywide fact.")
+
+hourly_cw_count = gold_hourly_cw.count()
+if hourly_cw_count != len(hourly_grid_rows):
+    raise ValueError(
+        f"Hourly citywide count mismatch for MONTHS: expected {len(hourly_grid_rows)}, got {hourly_cw_count}."
+    )
+
+bad_hourly_est = gold_hourly_cw.filter(
+    (F.col("available_sensor_count") < MIN_ELIGIBLE_SENSORS) & F.col("hourly_network_mean_pm25").isNotNull()
+).count()
+if bad_hourly_est > 0:
+    raise ValueError(
+        f"Found {bad_hourly_est} hours with < {MIN_ELIGIBLE_SENSORS} sensors having non-null hourly PM2.5 estimate."
+    )
+
+gold_hourly_cw.agg(
+    F.count("*").alias("total_local_hours"),
+    F.sum(F.when(F.col("hourly_network_mean_pm25").isNotNull(), 1).otherwise(0)).alias("hours_with_network_estimate"),
+    F.min("available_sensor_count").alias("min_available_sensors"),
+    F.max("available_sensor_count").alias("max_available_sensors"),
 ).show(truncate=False)
 
 print("ALL CHECKS PASSED")
