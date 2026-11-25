@@ -365,14 +365,14 @@ plt.show()
 
 econ_daily_pdf = (
     spark.table("dbo.fact_taxi_daily").alias("t")
-    .join(dim_date.select("date_key", "full_date", "year_month"), "date_key")
+    .join(dim_date.select("date_key", "full_date", "year_month").alias("d"), "date_key")
     .join(
         spark.table("dbo.fact_fx_daily").filter(F.col("currency_pair") == "EUR/USD").alias("fx"),
         "date_key",
     )
     .select(
-        F.col("full_date"),
-        F.col("year_month"),
+        F.col("d.full_date").alias("full_date"),
+        F.col("d.year_month").alias("year_month"),
         F.col("t.revenue_trip_count"),
         F.col("t.total_amount_usd"),
         (F.col("t.total_amount_usd") * F.col("fx.eur_per_usd_rate")).alias("total_amount_eur"),
