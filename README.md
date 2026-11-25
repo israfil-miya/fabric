@@ -104,6 +104,7 @@ flowchart LR
 | Economics Gold | Builds `dim_currency`, `dim_country`, `fact_gdp_annual`, and carry-forward `fact_fx_daily` | [nb_economics_gold](nb_economics_gold.Notebook/notebook-content.py) |
 | Combined Gold | Month-scoped left join of `fact_taxi_daily` and `fact_air_quality_daily_citywide` | [nb_taxi_air_quality_gold](nb_taxi_air_quality_gold.Notebook/notebook-content.py) |
 | Final Validation & Logging | Reconciles all layers and writes `lh_gold.dbo.etl_run_log` | [nb_validate_pipeline_run](nb_validate_pipeline_run.Notebook/notebook-content.py) |
+| Analytical Visualizations | Generates Phase 4 charts & answers all 4 analytical questions | [nb_analytics_insights](nb_analytics_insights.Notebook/notebook-content.py) |
 | Warehouse Star Schema | T-SQL views for `wh_nyc_analytics` (facts, dims, EUR conversion, quality audits) | [wh_nyc_analytics_star_schema.sql](sql/wh_nyc_analytics_star_schema.sql) |
 | Docs: Data Dictionary & Lineage | Table schemas, grains, and source-to-target mappings | [data_dictionary_and_lineage.md](docs/data_dictionary_and_lineage.md) |
 | Docs: Power BI & Semantic Model | Star-schema relationships, DAX measures, and 5-report blueprint | [powerbi_semantic_model_and_reports.md](docs/powerbi_semantic_model_and_reports.md) |

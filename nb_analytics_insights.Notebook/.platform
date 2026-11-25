@@ -1,0 +1,12 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "Notebook",
+    "displayName": "nb_analytics_insights",
+    "description": "Analytical visualizations and cross-domain summary answering all four project questions from lh_gold and lh_silver."
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "d4689273-ceb2-485b-ab1f-9c81cf341047"
+  }
+}
