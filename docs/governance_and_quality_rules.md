@@ -1,51 +1,55 @@
 # Governance, Data Quality Rules & Analytical Assumptions
 
-## 1. NYC Taxi Data Quality & Accounting Rules
+Building a pipeline across four real-world datasets meant deciding upfront which weird rows represent genuine domain behavior versus corrupted data, and making every decision auditable in Delta tables instead of burying it inside filters.
 
-### Record Preservation & Quarantine Policy
-| Condition | Treatment | Rationale |
-| --- | --- | --- |
-| `tpep_pickup_datetime IS NULL` | Quarantine (`silver_taxi_quarantine`) | Cannot be assigned reliably to a pickup date or month. |
-| `tpep_dropoff_datetime < tpep_pickup_datetime` | Quarantine (`silver_taxi_quarantine`) | Invalid timeline (e.g., clock/DST anomalies such as the 1,435 rows in `2025-11`). |
-| Valid pickup outside file's `year_month` | Quarantine (`OUT_OF_MONTH` scope) | Preserved for full Bronze reconciliation without polluting another month's `replaceWhere` slice. |
-| `trip_distance == 0` | Keep in `silver_taxi`; flag `is_zero_distance` | Kept as `0.0` (not `NULL`); included in `trip_count`, revenue, and `avg_distance_miles`, with `zero_distance_trips` and `zero_distance_pct` tracked separately. |
-| `trip_distance IS NULL` / `NaN` | Keep in `silver_taxi`; flag `is_missing_distance` | Included in `trip_count` and revenue; excluded only from distance averages. |
-| `trip_distance < 0` | Keep in `silver_taxi`; flag `is_negative_distance` | Preserved for audit; excluded from `avg_distance_miles` and counted in `negative_distance_trips`. |
-| `trip_distance > 100` | Keep in `silver_taxi`; flag `is_unusual_distance` | Preserved rather than silently dropped (`915` rows across Nov 2025–Mar 2026). |
-| `trip_duration_min > 480` (8 hours) | Keep in `silver_taxi`; flag `is_unusual_duration` | Preserved rather than silently dropped (`5,315` rows across Nov 2025–Mar 2026). |
-| `tpep_dropoff_datetime IS NULL` | Keep in `silver_taxi`; flag `is_missing_dropoff_datetime` | Valid pickup time allows date/hour attribution; `trip_duration_min` remains `NULL`. |
-| `fare_amount < 0` or `total_amount < 0` | Keep in `silver_taxi`; flag `is_negative_fare` / `is_negative_total` | Reported separately via gross nonnegative (`total_fare_usd`, `total_amount_usd`) and signed net (`net_fare_usd`, `net_total_amount_usd`) totals, and inspected by `payment_type`. |
-| `fare_amount IS NULL` or `total_amount IS NULL` | Keep in `silver_taxi`; flag `is_missing_amount` | Excluded from revenue sums; counted in `missing_amount_trips`. |
-| Exact duplicate rows | Flag `is_duplicate_record` + `duplicate_group_size` | Identified via SHA-256 `record_hash` without silent deduplication. |
+## 1. NYC Taxi Quality & Revenue Accounting
 
-### Revenue & Payment Type Definitions (TLC)
-- **`revenue_trip_count`**, **`total_fare_usd`**, and **`total_amount_usd`** share the identical eligibility rule: `~is_missing_amount & ~is_negative_amount`.
-- Separate measure-specific nonnegative columns (`gross_nonnegative_fare_usd`, `gross_nonnegative_total_amount_usd`) and signed net columns (`net_fare_usd`, `net_total_amount_usd`) allow exact reconciliation of negative adjustments (disputes, voided trips, and `payment_type = 0` Flex Fare adjustments).
-- TLC `payment_type` slices tracked explicitly in `fact_taxi_daily`: `0` (Flex Fare), `1` (Credit card), `2` (Cash), `3` (No charge), `4` (Dispute), `5` (Unknown), `6` (Voided trip).
+Raw TLC Yellow Taxi files contain records that look broken against strict transaction-log assumptions: zero-distance metered rides, negative totals, 12-hour durations, negative dropoff durations around DST changes, and pickup timestamps belonging to adjacent months. Silently dropping those rows changes trip counts and totals without leaving a trail.
 
----
+### What Gets Quarantined vs. Flagged
 
-## 2. OpenAQ Air Quality Rules & Limitations
+`nb_taxi_silver` splits Bronze Parquet records strictly into `silver_taxi` and `silver_taxi_quarantine` so `silver_row_count + quarantine_total_count == bronze_row_count` on every run:
 
-1. **Tri-State Flag Handling:** `coverage.flagInfo.hasFlags` (or top-level `flagInfo.hasFlags`) is mapped to `CONFIRMED_FLAGGED` (`True`), `CONFIRMED_UNFLAGGED` (`False`), or `UNKNOWN_FLAG_STATUS` (`NULL`). Missing flag info is **never** converted to `false`; only `CONFIRMED_UNFLAGGED` records enter `silver_air_quality_hourly`.
-2. **Multi-Reason Preservation:** Quarantined observations retain all applicable failure reasons in `quality_reasons` (e.g., `65` records in the 5-month baseline carry `"MISSING_VALUE,FLAGGED"`). Active interval flag events from `/sensors/{id}/flags` are preserved in `silver_air_quality_flags` and summarized onto hourly records without collapsing multiple overlapping events.
-3. **8 Selected Sensors vs. 11 Candidates:** `nb_build_silver_air_quality` keeps the 8 validated AirNow reference monitors (`673, 1097, 1102, 1103, 1152, 1128, 1145, 1146`) and exposes `INSPECT_CANDIDATE_SENSORS = True` to compare all Bronze candidates by provider, `is_monitor`, coordinates, instruments, completeness, and flag counts before any expansion decision.
-4. **Daily Network Eligibility:** A sensor-day requires `hour_coverage_pct >= 75.0` against DST-aware `expected_hour_count` (`23`, `24`, or `25` hours in `America/New_York`). A citywide day requires `eligible_sensor_count >= 4`; otherwise `network_mean_pm25` and `network_median_pm25` remain `NULL`.
-5. **Spatial Coverage Limitation:** The 8 selected monitors represent a monitoring-network estimate, not comprehensive NYC-wide or taxi-zone-level air quality. No causal claim is made between zone-hour taxi density and zone-level PM2.5.
+- **Quarantined (`silver_taxi_quarantine`):** Only three conditions prevent a trip from sitting inside a monthly Silver partition cleanly: missing `tpep_pickup_datetime`, `tpep_dropoff_datetime < tpep_pickup_datetime` (for example, `1,435` clock/DST timeline anomalies in `2025-11`), or valid pickups falling outside the Parquet file's expected `year_month` (`OUT_OF_MONTH`). Quarantining out-of-month rows keeps one month's file from overlapping another month's `replaceWhere` slice while preserving full source reconciliation.
+- **Kept and flagged (`silver_taxi`):** Valid-timeline in-month anomalies stay in Silver with explicit boolean flags and a comma-joined `quality_flags` summary:
+  - *Distance edge cases:* Zero-distance rides stay `0.0` (never rewritten to `NULL`) and flag `is_zero_distance`—these often reflect valid cancellations, flat-rate adjustments, or metered idle time. Missing (`NULL`/`NaN`) and negative distances flag `is_missing_distance` / `is_negative_distance`, stay in `trip_count`, and are excluded from distance averages. Rides over 100 miles flag `is_unusual_distance` instead of getting deleted.
+  - *Duration edge cases:* Missing dropoff timestamps stay in Silver (`is_missing_dropoff_datetime`) because a valid pickup timestamp still supports date/hour attribution (`trip_duration_min` stays `NULL`). Durations matching pickup (`is_zero_duration`) or exceeding 8 hours (`trip_duration_min > 480`, flagged `is_unusual_duration`) stay preserved rather than cropped.
+  - *Missing dimensions & exact duplicates:* Null passenger counts (`is_passenger_missing`) and null `PULocationID` values (`is_missing_pickup_location`, mapped to `-1` in Gold) remain counted. Exact row duplicates across all 20 source columns are tagged via a SHA-256 `record_hash` (`is_duplicate_record`, `duplicate_group_size`) without deduplicating them automatically.
+
+### Gross vs. Signed Net Revenue and Flex Fares
+
+Negative `fare_amount` and `total_amount` values are real accounting entries in TLC data—disputes, voided trips, and `payment_type = 0` (Flex Fare) adjustments frequently carry negative values, and `2025-11` has an especially heavy spike in negative adjustment records compared with `2025-12` onward.
+
+To prevent ambiguity between "trip revenue collected" and "net ledger total after adjustments":
+
+- `revenue_trip_count`, `total_fare_usd`, and `total_amount_usd` share the same eligibility filter (`~is_missing_amount & ~is_negative_amount`), ensuring average revenue per eligible trip uses matching numerators and denominators.
+- `fact_taxi_daily` also writes measure-specific nonnegative columns (`gross_nonnegative_fare_usd`, `gross_nonnegative_total_amount_usd`) alongside signed net columns (`net_fare_usd`, `net_total_amount_usd`, plus `net_fare_flex_usd` and `net_total_amount_flex_usd`) so negative adjustments remain transparent rather than hidden.
+- Trip counts for all official TLC `payment_type` codes (`0` Flex Fare through `6` Voided trip) are stored explicitly.
 
 ---
 
-## 3. Economic Conversion Policy (ECB & World Bank)
+## 2. OpenAQ Air Quality Design & Limitations
 
-- **Quote Direction:** ECB `EXR/D.USD.EUR.SP00.A` publishes `USD per 1 EUR` (`base_currency = 'EUR'`, `quote_currency = 'USD'`). Both `usd_per_eur_rate` and `eur_per_usd_rate = 1.0 / usd_per_eur_rate` are stored explicitly.
-- **Weekend & Holiday Policy:** On non-business days when ECB publishes no rate, `fact_fx_daily` carries forward the most recent prior business-day rate (`ECB_LAST_BUSINESS_DAY_CARRY_FORWARD`) using a 14-day Bronze lookback buffer, retaining `rate_observation_date`, `is_carry_forward_rate`, and `days_since_rate_observation`.
-- **GDP Modeling:** World Bank `NY.GDP.MKTP.CD` is modeled as annual numeric fact `fact_gdp_annual` (`country_iso3 + year`), with unpublished/null years quarantined in `silver_world_bank_gdp_quarantine`.
+Air-quality monitoring data brings a different set of failure modes: API maintenance flags, mixed sensor tiers, UTC-to-local boundary shifts, and station downtime.
+
+- **Tri-state flag handling (`flag_status`):** OpenAQ's `hasFlags` field is treated as three states—`CONFIRMED_FLAGGED` (`True`), `CONFIRMED_UNFLAGGED` (`False`), and `UNKNOWN_FLAG_STATUS` (`NULL`). Missing flag metadata is never coerced to `False`. Only `CONFIRMED_UNFLAGGED` observations with `parameter = 'pm25'`, `unit = 'µg/m³'`, and non-negative `pm25_value` enter `silver_air_quality_hourly`.
+- **Multi-reason quarantine & interval flags:** If an hourly reading is both missing a value and flagged (`MISSING_VALUE,FLAGGED`), `silver_air_quality_quarantine` preserves all failing reasons in `quality_reasons` alongside the primary `quality_status`. Interval flag events fetched from `/sensors/{id}/flags` are stored in `silver_air_quality_flags` and joined onto hourly records as counts and sorted label lists without collapsing distinct active flags.
+- **Selecting 8 AirNow reference monitors:** `nb_ingest_openaq` targets eight validated AirNow regulatory monitors (`673, 1097, 1102, 1103, 1152, 1128, 1145, 1146`). `nb_build_silver_air_quality` leaves `INSPECT_CANDIDATE_SENSORS = True` by default so Bronze candidate tables can still be compared on `is_monitor`, coordinates, instrument, and flag volume before expanding the network.
+- **DST-aware grids and minimum daily eligibility:** Because NYC observes Daylight Saving Time, `fact_air_quality_daily_sensor` computes `expected_hour_count` dynamically per `local_date` (`America/New_York`: `25` on `2025-11-02`, `23` on `2026-03-08`, `24` otherwise), and `fact_air_quality_hourly_citywide` aggregates per `(local_date, local_hour, sensor_id)` first so a fall-back double hour gives each sensor one vote. A sensor-day is eligible toward citywide metrics only when `hour_coverage_pct >= 75.0`, and a citywide day requires `eligible_sensor_count >= 4`—otherwise `network_mean_pm25` and `network_median_pm25` stay `NULL` (leaving 19 low-coverage days in early November 2025 blank rather than biased).
+- **Spatial limitation:** Eight fixed AirNow monitors measure a citywide monitoring network, not neighborhood-level exposure inside individual taxi zones. Nothing in this project claims zone-level causal impact between taxi density and localized PM2.5.
 
 ---
 
-## 4. Operations, Security & Governance
+## 3. Economics & Currency Conversion (ECB + World Bank)
 
-- **Secret Management ($0 Azure Cost Pattern):** `nb_ingest_openaq` reads the OpenAQ API key from OneLake (`Files/_secrets/openaq.json` or `Files/openaq.json` in `lh_bronze`), keeping credentials out of Git and out of pipeline/notebook parameter snapshots. Optional `KEY_VAULT_URL` support via `notebookutils.credentials.getSecret` remains available if an Azure Key Vault is provisioned later.
-- **Monitoring & Alerting:** Every `pl_nyc_analytics_master` run executes `nb_validate_pipeline_run`, writing per-source/month reconciliation status to `lh_gold.dbo.etl_run_log`. Upstream ingestion, Silver, or Gold failures halt downstream publishing immediately.
-- **Scheduled Refresh:** Schedule `pl_nyc_analytics_master` monthly (or daily/weekly in discovery mode) via Fabric Pipeline **Schedule** settings, followed by semantic model refresh on `wh_nyc_analytics`.
-- **Data Lineage & Access Control:** Fabric Workspace **Lineage View** (and Microsoft Purview if enabled at tenant level) tracks end-to-end lineage from `lh_bronze` → `lh_silver` → `lh_gold` → `wh_nyc_analytics` → Power BI. Restrict `lh_bronze` write access to pipeline/engineering roles and grant analysts read access via `wh_nyc_analytics` (adding Power BI Row-Level Security on `dim_taxi_zone[borough]` or `dim_country` if department scoping is required).
+- **Quote direction (`EUR/USD`):** ECB series `EXR/D.USD.EUR.SP00.A` publishes how many US dollars equal one euro (`base_currency = 'EUR'`, `quote_currency = 'USD'`). Silver stores both `usd_per_eur_rate` and its exact reciprocal `eur_per_usd_rate = 1.0 / usd_per_eur_rate`, so converting daily USD taxi revenue to EUR multiplies cleanly by `eur_per_usd_rate`.
+- **Weekend and holiday carry-forward:** ECB only publishes rates on European business days, whereas taxi activity runs 365 days a year. `nb_ingest_ecb_fx` buffers API queries back 14 calendar days before the earliest selected month so that even if a month starts on a weekend or holiday, `fact_fx_daily` always finds a prior valid rate. Carried-forward days carry policy `ECB_LAST_BUSINESS_DAY_CARRY_FORWARD` along with `rate_observation_date`, `is_carry_forward_rate`, and `days_since_rate_observation`.
+- **GDP modeling:** World Bank indicator `NY.GDP.MKTP.CD` is modeled as annual numeric fact `fact_gdp_annual` (`USA` and Eurozone aggregate `EMU`), with unpublished or null years routed to `silver_world_bank_gdp_quarantine`.
+
+---
+
+## 4. Operations, Secrets & Monitoring
+
+- **API credentials without Key Vault overhead:** To avoid provisioning Azure Key Vault strictly for one free OpenAQ API key, `nb_ingest_openaq` reads the token from `lh_bronze/Files/_secrets/openaq.json` (git-ignored and outside notebook parameter snapshots), while retaining optional `KEY_VAULT_URL` lookup via `notebookutils.credentials.getSecret` if a Key Vault is attached later.
+- **Pre-flight and post-run gates:** Every Gold notebook refuses to publish if its upstream Silver audit table (`silver_*_quality_audit`) is missing or has `reconciliation_passed = False`. At the end of `pl_nyc_analytics_master`, `nb_validate_pipeline_run` cross-checks Bronze audits, Silver audits, Gold counts, and key uniqueness across all sources and appends one row per source/month to `lh_gold.dbo.etl_run_log`.
+- **What is not configured yet:** Pipeline scheduling in Fabric and a Power BI semantic model / report layer (including workspace RBAC separation or Power BI Row-Level Security if analysts are scoped by borough or country) are left for downstream deployment. Right now, `wh_nyc_analytics` provides the read-only T-SQL view layer and `nb_analytics_insights` provides the visual analysis.

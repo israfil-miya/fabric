@@ -1,22 +1,14 @@
-# NYC Urban Mobility, Air Quality & Macroeconomic Analytics Platform (Microsoft Fabric)
+# NYC Urban Mobility, Air Quality & Macroeconomic Analytics
 
-A **month-driven, zero-silent-drop Microsoft Fabric analytics platform** integrating **NYC TLC Yellow Taxi trips**, **OpenAQ v3 PM2.5 air-quality monitoring**, **World Bank annual GDP**, and **ECB daily USD/EUR exchange rates** across Bronze, Silver, Gold, Warehouse, and Power BI layers.
+This Microsoft Fabric project connects three datasets that rarely sit in the same warehouse: New York City Yellow Taxi trips, hourly PM2.5 readings from OpenAQ v3 air-quality monitors, and macroeconomic series from the European Central Bank and the World Bank. Over a five-month window (`2025-11` through `2026-03`), the pipeline explores how urban ridership patterns move alongside daily and hourly particulate matter, how daily taxi revenue translates between USD and EUR across market holidays, and how recent U.S. and Eurozone GDP sits as long-run context behind short-term city data.
 
----
-
-## Core Engineering Principles
-
-1. **Single Authoritative Month Selection:** One `months` parameter (explicit list or Bronze discovery via `nb_resolve_taxi_months`) drives ingestion, Silver transformations, Gold aggregations, and cross-layer reconciliation across all sources.
-2. **Zero Silent Record Loss:** Source records are never silently discarded. In-scope anomalies are preserved and flagged; invalid-timeline or out-of-month records are quarantined with explicit reasons; every Bronze-to-Silver-to-Gold boundary reconciles row counts (`diff = 0`).
-3. **Idempotent Month-Scoped Reprocessing:** All monthly Silver and Gold tables use Delta `replaceWhere` by month/date range so reprocessing one month (or nonconsecutive months) never duplicates rows or alters untouched history.
-4. **Explicit Analytical Boundaries:**
-   - Zero-distance taxi trips remain `0.0` (never `NULL`) and are included in `avg_distance_miles`, with `avg_positive_distance_miles` provided as a comparison.
-   - Daily PM2.5 represents an **8-monitor AirNow network estimate** (requiring ≥75% valid hourly coverage per sensor and ≥4 eligible sensors; days below threshold remain `NULL`, never `0`).
-   - Taxi revenue in EUR uses ECB's **last-business-day carry-forward** rate on weekends/holidays and retains the actual `rate_observation_date`.
+Working across these sources together exposes real data-engineering problems that isolated toy datasets skip. Yellow Taxi Parquet files contain 3.4 to 4.3 million trips per month, mixed alongside DST clock anomalies, zero-distance rides, negative Flex Fare adjustments, and stray out-of-month timestamps. Meanwhile, street-level air-quality data comes from sparse monitoring stations with sensor dropouts and maintenance flags, and ECB exchange rates pause on weekends and holidays while taxis run every day. Rather than smoothing these quirks away before loading, the pipeline preserves source accountability from Bronze through Gold and exposes both metrics and quality flags downstream.
 
 ---
 
-## Architecture
+## How the Pipeline Works
+
+One master Fabric pipeline (`pl_nyc_analytics_master`) coordinates the entire flow around a single month selection resolved at startup by `nb_resolve_taxi_months`. Downstream notebooks ingest only the requested months, isolate anomalies into Silver quarantine tables without dropping records, rebuild month-scoped Gold star-schema facts, and run cross-layer reconciliation before writing run status to `etl_run_log`.
 
 ```mermaid
 flowchart LR
@@ -31,7 +23,7 @@ flowchart LR
         RES["nb_resolve_taxi_months"]
     end
 
-    subgraph Bronze["lh_bronze (Raw + Normalized Delta)"]
+    subgraph Bronze["lh_bronze (Files + Normalized Delta)"]
         B1["Files/taxi/*.parquet + taxi_zone_lookup.csv"]
         B2["nb_ingest_openaq -> raw JSON + bronze_openaq_*"]
         B3["nb_ingest_world_bank -> bronze_world_bank_gdp"]
@@ -46,14 +38,14 @@ flowchart LR
 
     subgraph Gold["lh_gold (Star Schema + Run Log)"]
         G1["nb_taxi_gold -> dim_date, dim_taxi_zone, fact_taxi_daily, fact_taxi_hourly_zone"]
-        G2["nb_air_quality_gold -> dim_air_quality_sensor, fact_air_quality_daily_*"]
+        G2["nb_air_quality_gold -> dim_air_quality_sensor, fact_air_quality_*"]
         G3["nb_economics_gold -> dim_currency, dim_country, fact_gdp_annual, fact_fx_daily"]
         G4["nb_taxi_air_quality_gold -> fact_taxi_air_quality_daily"]
         VAL["nb_validate_pipeline_run -> etl_run_log"]
     end
 
-    subgraph Serve["Warehouse & Analytics"]
-        WH["wh_nyc_analytics (18 Star-Schema Views)"]
+    subgraph Serve["Warehouse & Notebook Insights"]
+        WH["wh_nyc_analytics (18 SQL Views)"]
         VIS["nb_analytics_insights (Charts & KPIs)"]
     end
 
@@ -70,69 +62,73 @@ flowchart LR
 
 ---
 
-## Verified Baseline Results (5-Month Period: `2025-11` to `2026-03`)
+## Key Engineering & Analytical Choices
 
-- **NYC Taxi Silver Reconciliation (`nb_taxi_silver`):**
-  - `2025-11`: `4,181,444` Bronze = `4,179,985` Silver + `1,459` Quarantine (`diff = 0`)
-  - `2025-12`: `4,305,006` Bronze = `4,304,995` Silver + `11` Quarantine (`diff = 0`)
-  - `2026-01`: `3,724,889` Bronze = `3,724,881` Silver + `8` Quarantine (`diff = 0`)
-  - `2026-02`: `3,399,866` Bronze = `3,399,848` Silver + `18` Quarantine (`diff = 0`)
-  - `2026-03`: `3,952,451` Bronze = `3,952,430` Silver + `21` Quarantine (`diff = 0`)
-  - `7,736` rows that legacy filters would have silently dropped are now explicitly preserved, flagged, or quarantined.
-- **OpenAQ Silver Reconciliation (`nb_build_silver_air_quality`):**
-  - `25,168` in-scope hourly records across 5 months = `25,066` accepted (`CONFIRMED_UNFLAGGED`) + `102` quarantined (`37` `FLAGGED`, `65` `MISSING_VALUE,FLAGGED`; `diff = 0`).
-- **Combined Gold (`nb_taxi_air_quality_gold`):**
-  - `151` daily records (`132` days with reliable PM2.5 network estimates; `19` days in `2025-11` below minimum coverage kept as `NULL`; `0` duplicate `date_key`s).
-- **Master Pipeline (`pl_nyc_analytics_master`):** Verified end-to-end in both single-month explicit mode and full-period Bronze discovery mode.
+- **Month-scoped idempotency:** Every monthly Silver and Gold table writes through Delta `replaceWhere` bounded to the active months (for example `local_date >= month_start AND local_date < month_end` or integer `date_key` ranges). As a result, single-month backfills and nonconsecutive re-runs leave unrelated history untouched and avoid duplicate rows.
+- **No silent row drops:** Records with invalid timelines (such as dropoffs recorded before pickups during DST fall-back) or out-of-month timestamps go to quarantine tables rather than being filtered out quietly. Valid edge cases stay in Silver with explicit boolean flags, and every Bronze-to-Silver and Silver-to-Gold boundary asserts zero unexplained row-count drift. Across the five-month baseline, that catches thousands of long-distance, long-duration, and clock-skew rows that naive filters used to drop silently.
+- **Separate gross and net taxi revenue:** Negative `fare_amount` and `total_amount` values appear legitimately in TLC data due to disputes, voids, and Flex Fare (`payment_type = 0`) adjustments—most visibly in `2025-11`. Rather than picking one interpretation, Gold facts expose both gross nonnegative totals and signed net totals side by side, along with counts by `payment_type`. Similarly, zero-distance rides remain `0.0` inside `avg_distance_miles`, paired with `avg_positive_distance_miles` for comparison.
+- **Conservative air-quality aggregation:** The air-quality layer reads eight validated AirNow reference monitors rather than mixing uncalibrated sensors or guessing missing flag statuses. Daily citywide PM2.5 requires at least 4 sensors meeting 75% valid hourly coverage (using DST-aware 23-, 24-, or 25-hour local days); low-coverage days stay `NULL` instead of falling back to `0`.
+- **Transparent FX carry-forward:** ECB does not publish `EUR/USD` reference rates on weekends or TARGET closing holidays. Using a 14-day Bronze lookback window, `fact_fx_daily` carries forward the last published business-day rate onto non-trading dates while storing `rate_observation_date` and `is_carry_forward_rate` so analysts can audit rate staleness directly.
 
 ---
 
-## Repository Structure
+## What the Data Shows and Current Limitations
 
-| Component | Purpose | Link |
+Across November 2025 through March 2026 (`151` calendar days, `132` meeting the daily air-quality coverage threshold after early-November sensor gaps), the analytical notebook [nb_analytics_insights](nb_analytics_insights.Notebook/notebook-content.py) highlights a few practical takeaways alongside clear boundaries:
+
+- **Urban mobility and PM2.5:** Day-to-day NYC taxi volume and citywide PM2.5 do not follow a strong linear relationship; weather, regional transport, and seasonal heating dominate daily variance more than cab counts alone. Hourly profiles are more useful for comparing weekday/weekend demand peaks against diurnal particulate curves.
+- **Monitor density limits spatial claims:** Eight stationary AirNow monitors provide a consistent network-level PM2.5 signal, not neighborhood-by-neighborhood air quality across all 260+ TLC taxi zones. `fact_taxi_hourly_zone` supports spatial/temporal demand analysis without implying zone-level pollution causality.
+- **Macro GDP scope:** World Bank annual GDP provides multi-year U.S. vs. Eurozone background scale rather than an explanatory driver for a five-month city mobility window.
+- **Reporting layer:** Power BI semantic models and live dashboards have not been built yet. Visual exploration currently runs inside [nb_analytics_insights](nb_analytics_insights.Notebook/notebook-content.py), while [wh_nyc_analytics](wh_nyc_analytics.Warehouse/wh_nyc_analytics.sqlproj) already exposes all 18 dimension, fact, and audit views over T-SQL for BI tools when needed.
+
+Detailed column contracts live in [Data Dictionary & Source-to-Target Lineage](docs/data_dictionary_and_lineage.md), and the full reasoning behind every quarantine and accounting policy lives in [Governance, Data Quality Rules & Analytical Assumptions](docs/governance_and_quality_rules.md).
+
+---
+
+## Project Structure
+
+| Component | Purpose | Location |
 | --- | --- | --- |
-| Master Pipeline | Orchestrates month resolution, parallel ingestion, Silver, Gold, and validation | [pipeline-content.json](pl_nyc_analytics_master.DataPipeline/pipeline-content.json) |
-| Taxi Ingestion Pipeline | Downloads monthly Yellow Taxi Parquet files with retries | [pipeline-content.json](pl_ingest_taxi.DataPipeline/pipeline-content.json) |
-| Month Resolver | Validates explicit `MONTHS_JSON` or discovers Bronze Parquet months | [nb_resolve_taxi_months](nb_resolve_taxi_months.Notebook/notebook-content.py) |
-| OpenAQ Ingestion | Fetches OpenAQ v3 hourly measurements, metadata, and flags; saves raw JSON + Delta | [nb_ingest_openaq](nb_ingest_openaq.Notebook/notebook-content.py) |
-| World Bank Ingestion | Fetches `NY.GDP.MKTP.CD` annual GDP JSON and writes Bronze Delta | [nb_ingest_world_bank](nb_ingest_world_bank.Notebook/notebook-content.py) |
-| ECB FX Ingestion | Fetches daily `EXR/D.USD.EUR.SP00.A` CSV with lookback buffer and writes Bronze Delta | [nb_ingest_ecb_fx](nb_ingest_ecb_fx.Notebook/notebook-content.py) |
-| Taxi Silver | Classifies quality flags, quarantines invalid/out-of-month trips, audits counts | [nb_taxi_silver](nb_taxi_silver.Notebook/notebook-content.py) |
-| Air Quality Silver | Tri-state `flag_status`, multi-reason quarantine, 11-sensor audit, month-scoped writes | [nb_build_silver_air_quality](nb_build_silver_air_quality.Notebook/notebook-content.py) |
-| Economics Silver | Cleans, classifies, and reconciles World Bank GDP and ECB FX | [nb_build_silver_economics](nb_build_silver_economics.Notebook/notebook-content.py) |
-| Taxi Gold | Builds `dim_date`, `dim_taxi_zone`, `fact_taxi_daily`, and `fact_taxi_hourly_zone` | [nb_taxi_gold](nb_taxi_gold.Notebook/notebook-content.py) |
-| Air Quality Gold | Builds `dim_air_quality_sensor`, DST-aware `fact_air_quality_daily_sensor`, daily & hourly citywide facts | [nb_air_quality_gold](nb_air_quality_gold.Notebook/notebook-content.py) |
-| Economics Gold | Builds `dim_currency`, `dim_country`, `fact_gdp_annual`, and carry-forward `fact_fx_daily` | [nb_economics_gold](nb_economics_gold.Notebook/notebook-content.py) |
-| Combined Gold | Month-scoped left join of `fact_taxi_daily` and `fact_air_quality_daily_citywide` | [nb_taxi_air_quality_gold](nb_taxi_air_quality_gold.Notebook/notebook-content.py) |
-| Final Validation & Logging | Reconciles all layers and writes `lh_gold.dbo.etl_run_log` | [nb_validate_pipeline_run](nb_validate_pipeline_run.Notebook/notebook-content.py) |
-| Analytical Visualizations | Generates Phase 4 charts & answers all 4 analytical questions | [nb_analytics_insights](nb_analytics_insights.Notebook/notebook-content.py) |
-| Warehouse Star Schema | Fabric Warehouse SQL project & 18 star-schema/audit views | [wh_nyc_analytics.sqlproj](wh_nyc_analytics.Warehouse/wh_nyc_analytics.sqlproj) |
-| Docs: Data Dictionary & Lineage | Table schemas, grains, and source-to-target mappings | [data_dictionary_and_lineage.md](docs/data_dictionary_and_lineage.md) |
-| Docs: Governance & Quality Rules | Quality classifications, TLC/ECB/OpenAQ assumptions, and operations runbook | [governance_and_quality_rules.md](docs/governance_and_quality_rules.md) |
+| Master Pipeline | Resolves months, runs parallel ingestion, Silver, Gold, and final checks | [pl_nyc_analytics_master](pl_nyc_analytics_master.DataPipeline/pipeline-content.json) |
+| Taxi Ingestion Pipeline | Downloads monthly NYC TLC Parquet files into Bronze with retries | [pl_ingest_taxi](pl_ingest_taxi.DataPipeline/pipeline-content.json) |
+| Month Resolver | Validates `MONTHS_JSON` or discovers existing Bronze Parquet months | [nb_resolve_taxi_months](nb_resolve_taxi_months.Notebook/notebook-content.py) |
+| OpenAQ Ingestion | Fetches OpenAQ v3 sensor metadata, hourly readings, and flags | [nb_ingest_openaq](nb_ingest_openaq.Notebook/notebook-content.py) |
+| World Bank & ECB Ingestion | Fetches `NY.GDP.MKTP.CD` annual GDP and daily ECB `USD/EUR` FX | [nb_ingest_world_bank](nb_ingest_world_bank.Notebook/notebook-content.py), [nb_ingest_ecb_fx](nb_ingest_ecb_fx.Notebook/notebook-content.py) |
+| Silver Layer Notebooks | Schema enforcement, flag classification, quarantine routing, and audit tables | [nb_taxi_silver](nb_taxi_silver.Notebook/notebook-content.py), [nb_build_silver_air_quality](nb_build_silver_air_quality.Notebook/notebook-content.py), [nb_build_silver_economics](nb_build_silver_economics.Notebook/notebook-content.py) |
+| Gold Layer Notebooks | Star-schema dimensions, daily/hourly facts, FX carry-forward, combined daily fact | [nb_taxi_gold](nb_taxi_gold.Notebook/notebook-content.py), [nb_air_quality_gold](nb_air_quality_gold.Notebook/notebook-content.py), [nb_economics_gold](nb_economics_gold.Notebook/notebook-content.py), [nb_taxi_air_quality_gold](nb_taxi_air_quality_gold.Notebook/notebook-content.py) |
+| Run Validation & Logging | Cross-layer reconciliation writing status rows to `lh_gold.dbo.etl_run_log` | [nb_validate_pipeline_run](nb_validate_pipeline_run.Notebook/notebook-content.py) |
+| Analytical Notebook | Generates five visualization panels answering the core project questions | [nb_analytics_insights](nb_analytics_insights.Notebook/notebook-content.py) |
+| Fabric Warehouse | SQL database project exposing 18 star-schema and audit views | [wh_nyc_analytics](wh_nyc_analytics.Warehouse/wh_nyc_analytics.sqlproj) |
+| Technical Documentation | Schema contracts, lineage, data-quality policies, and operational notes | [Data Dictionary](docs/data_dictionary_and_lineage.md), [Governance & Quality Rules](docs/governance_and_quality_rules.md) |
 
 ---
 
-## How to Run in Microsoft Fabric
+## Running in Microsoft Fabric
 
-Trigger `pl_nyc_analytics_master` with one of two mutually exclusive modes:
+`pl_nyc_analytics_master` runs in one of two mutually exclusive month modes (`nb_resolve_taxi_months` fails fast when both `months` and `discover_months: true` are supplied).
 
-- **Explicit months (supports new Taxi downloads):**
-  ```json
-  {
-    "months": ["2025-11", "2025-12", "2026-01", "2026-02", "2026-03"],
-    "discover_months": false,
-    "ingest_taxi": true,
-    "ingest_openaq": true,
-    "ingest_economics": true
-  }
-  ```
-- **Bronze discovery (reprocesses all valid Parquet months already in `lh_bronze/Files/taxi`):**
-  ```json
-  {
-    "months": [],
-    "discover_months": true,
-    "ingest_taxi": false,
-    "ingest_openaq": true,
-    "ingest_economics": true
-  }
-  ```
+To ingest and process an explicit list of months:
+
+```json
+{
+  "months": ["2025-11", "2025-12", "2026-01", "2026-02", "2026-03"],
+  "discover_months": false,
+  "ingest_taxi": true,
+  "ingest_openaq": true,
+  "ingest_economics": true
+}
+```
+
+To reprocess every valid Yellow Taxi Parquet month already sitting in `lh_bronze/Files/taxi` without re-downloading TLC files (set `ingest_taxi` to `false` explicitly, since its pipeline default is `true`):
+
+```json
+{
+  "months": [],
+  "discover_months": true,
+  "ingest_taxi": false,
+  "ingest_openaq": true,
+  "ingest_economics": true
+}
+```
+
+OpenAQ ingestion expects an API key stored in `lh_bronze/Files/_secrets/openaq.json` (or passed via pipeline/Azure Key Vault settings; see [Governance & Quality Rules](docs/governance_and_quality_rules.md#4-operations-secrets--monitoring)). Once Gold finishes cleanly, run [nb_analytics_insights](nb_analytics_insights.Notebook/notebook-content.py) interactively with `MONTHS_JSON = "[]"` to inspect all available months or pass an explicit JSON array to slice a subset.
