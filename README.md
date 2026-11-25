@@ -1,8 +1,8 @@
 # NYC Urban Mobility, Air Quality & Macroeconomic Analytics
 
-This Microsoft Fabric project connects three datasets that rarely sit in the same warehouse: New York City Yellow Taxi trips, hourly PM2.5 readings from OpenAQ v3 air-quality monitors, and macroeconomic series from the European Central Bank and the World Bank. Over a five-month window (`2025-11` through `2026-03`), the pipeline explores how urban ridership patterns move alongside daily and hourly particulate matter, how daily taxi revenue translates between USD and EUR across market holidays, and how recent U.S. and Eurozone GDP sits as long-run context behind short-term city data.
+This Microsoft Fabric project connects three datasets that rarely sit in the same warehouse: New York City Yellow Taxi trips, hourly PM2.5 readings from OpenAQ v3 air-quality monitors, and macroeconomic series from the European Central Bank and the World Bank. Over a five-month window (`2025-11` through `2026-03`), the pipeline explores how urban ridership moves alongside daily and hourly particulate matter, how daily taxi revenue translates between USD and EUR across market holidays, and how recent U.S. and Eurozone GDP sits as long-run context behind short-term city data.
 
-Working across these sources together exposes real data-engineering problems that isolated toy datasets skip. Yellow Taxi Parquet files contain 3.4 to 4.3 million trips per month, mixed alongside DST clock anomalies, zero-distance rides, negative Flex Fare adjustments, and stray out-of-month timestamps. Meanwhile, street-level air-quality data comes from sparse monitoring stations with sensor dropouts and maintenance flags, and ECB exchange rates pause on weekends and holidays while taxis run every day. Rather than smoothing these quirks away before loading, the pipeline preserves source accountability from Bronze through Gold and exposes both metrics and quality flags downstream.
+Working across these sources together exposes real data-engineering problems that isolated toy datasets skip. Yellow Taxi Parquet files contain 3.4 to 4.3 million trips per month, mixed with DST clock anomalies, zero-distance rides, negative Flex Fare adjustments, and stray out-of-month timestamps. Street-level air-quality data comes from sparse monitoring stations with sensor dropouts and maintenance flags, and ECB exchange rates pause on weekends and holidays while taxis run every day. Rather than smoothing these quirks away before loading, the pipeline preserves source accountability from Bronze through Gold and exposes both metrics and quality flags downstream.
 
 ---
 
@@ -64,24 +64,27 @@ flowchart LR
 
 ## Key Engineering & Analytical Choices
 
-- **Month-scoped idempotency:** Every monthly Silver and Gold table writes through Delta `replaceWhere` bounded to the active months (for example `local_date >= month_start AND local_date < month_end` or integer `date_key` ranges). As a result, single-month backfills and nonconsecutive re-runs leave unrelated history untouched and avoid duplicate rows.
-- **No silent row drops:** Records with invalid timelines (such as dropoffs recorded before pickups during DST fall-back) or out-of-month timestamps go to quarantine tables rather than being filtered out quietly. Valid edge cases stay in Silver with explicit boolean flags, and every Bronze-to-Silver and Silver-to-Gold boundary asserts zero unexplained row-count drift. Across the five-month baseline, that catches thousands of long-distance, long-duration, and clock-skew rows that naive filters used to drop silently.
-- **Separate gross and net taxi revenue:** Negative `fare_amount` and `total_amount` values appear legitimately in TLC data due to disputes, voids, and Flex Fare (`payment_type = 0`) adjustments—most visibly in `2025-11`. Rather than picking one interpretation, Gold facts expose both gross nonnegative totals and signed net totals side by side, along with counts by `payment_type`. Similarly, zero-distance rides remain `0.0` inside `avg_distance_miles`, paired with `avg_positive_distance_miles` for comparison.
-- **Conservative air-quality aggregation:** The air-quality layer reads eight validated AirNow reference monitors rather than mixing uncalibrated sensors or guessing missing flag statuses. Daily citywide PM2.5 requires at least 4 sensors meeting 75% valid hourly coverage (using DST-aware 23-, 24-, or 25-hour local days); low-coverage days stay `NULL` instead of falling back to `0`.
-- **Transparent FX carry-forward:** ECB does not publish `EUR/USD` reference rates on weekends or TARGET closing holidays. Using a 14-day Bronze lookback window, `fact_fx_daily` carries forward the last published business-day rate onto non-trading dates while storing `rate_observation_date` and `is_carry_forward_rate` so analysts can audit rate staleness directly.
+Every monthly Silver and Gold table writes through Delta `replaceWhere` bounded to the active months (for example `local_date >= month_start AND local_date < month_end` or integer `date_key` ranges). Single-month backfills and nonconsecutive re-runs therefore leave unrelated history untouched and avoid duplicate rows.
+
+Source records are never silently dropped. Trips with invalid timelines (such as dropoffs recorded before pickups during DST fall-back) or out-of-month timestamps go to quarantine tables rather than failing quietly or corrupting adjacent months. Valid edge cases stay in Silver with explicit boolean flags, and every Bronze-to-Silver and Silver-to-Gold boundary verifies zero unexplained row-count drift. Across the five-month baseline, that accounts for thousands of long-distance, long-duration, and clock-skew records that typical pre-filters discard.
+
+Taxi financial reporting keeps gross and net accounting separate. Negative `fare_amount` and `total_amount` entries appear legitimately in TLC files due to disputes, voids, and Flex Fare (`payment_type = 0`) adjustments, with a notable spike in `2025-11`. Gold facts publish both gross nonnegative totals and signed net totals side by side alongside counts by `payment_type`. Zero-distance rides likewise stay `0.0` inside `avg_distance_miles`, paired with `avg_positive_distance_miles` for comparison.
+
+For air quality and foreign exchange, the models prefer explicit gaps and provenance over silent interpolation. The air-quality layer reads eight validated AirNow reference monitors rather than mixing uncalibrated sensors or coercing missing flag metadata to unflagged. Daily citywide PM2.5 requires at least 4 sensors meeting 75% valid hourly coverage (on DST-aware 23-, 24-, or 25-hour local days), leaving days below threshold as `NULL` instead of `0`. Because ECB does not publish `EUR/USD` rates on weekends or TARGET holidays, `fact_fx_daily` uses a 14-day Bronze lookback window to carry forward the most recent business-day rate while storing `rate_observation_date` and `is_carry_forward_rate` for auditing.
 
 ---
 
 ## What the Data Shows and Current Limitations
 
-Across November 2025 through March 2026 (`151` calendar days, `132` meeting the daily air-quality coverage threshold after early-November sensor gaps), the analytical notebook [nb_analytics_insights](nb_analytics_insights.Notebook/notebook-content.py) highlights a few practical takeaways alongside clear boundaries:
+Across November 2025 through March 2026 (`151` calendar days, `132` of which meet the daily air-quality coverage threshold after early-November sensor gaps), the charts in [nb_analytics_insights](nb_analytics_insights.Notebook/notebook-content.py) highlight practical relationships alongside clear analytical limits.
 
-- **Urban mobility and PM2.5:** Day-to-day NYC taxi volume and citywide PM2.5 do not follow a strong linear relationship; weather, regional transport, and seasonal heating dominate daily variance more than cab counts alone. Hourly profiles are more useful for comparing weekday/weekend demand peaks against diurnal particulate curves.
-- **Monitor density limits spatial claims:** Eight stationary AirNow monitors provide a consistent network-level PM2.5 signal, not neighborhood-by-neighborhood air quality across all 260+ TLC taxi zones. `fact_taxi_hourly_zone` supports spatial/temporal demand analysis without implying zone-level pollution causality.
-- **Macro GDP scope:** World Bank annual GDP provides multi-year U.S. vs. Eurozone background scale rather than an explanatory driver for a five-month city mobility window.
-- **Reporting layer:** Power BI semantic models and live dashboards have not been built yet. Visual exploration currently runs inside [nb_analytics_insights](nb_analytics_insights.Notebook/notebook-content.py), while [wh_nyc_analytics](wh_nyc_analytics.Warehouse/wh_nyc_analytics.sqlproj) already exposes all 18 dimension, fact, and audit views over T-SQL for BI tools when needed.
+Day-to-day NYC taxi volume and citywide PM2.5 do not follow a strong linear correlation, as weather, regional transport, and seasonal heating drive daily air-quality variance far more than cab counts alone. Hourly profiles are better suited for comparing weekday and weekend ridership peaks against diurnal particulate curves.
 
-Detailed column contracts live in [Data Dictionary & Source-to-Target Lineage](docs/data_dictionary_and_lineage.md), and the full reasoning behind every quarantine and accounting policy lives in [Governance, Data Quality Rules & Analytical Assumptions](docs/governance_and_quality_rules.md).
+Coverage also bounds what can be claimed from the external reference data. Eight fixed AirNow monitors capture a network-level PM2.5 signal rather than neighborhood-level air quality across all 260+ TLC taxi zones, so `fact_taxi_hourly_zone` supports temporal and spatial demand analysis without implying zone-level pollution causality. Likewise, World Bank annual GDP provides multi-year U.S. versus Eurozone backdrop rather than an explanatory driver for a five-month operational window.
+
+On the serving side, Power BI semantic models and live dashboards have not been built yet. Visual analysis currently runs inside [nb_analytics_insights](nb_analytics_insights.Notebook/notebook-content.py), while [wh_nyc_analytics](wh_nyc_analytics.Warehouse/wh_nyc_analytics.sqlproj) already exposes all 18 dimension, fact, and audit views over T-SQL for BI tools when needed.
+
+Column-level schemas and grain definitions are documented in [Data Dictionary & Source-to-Target Lineage](docs/data_dictionary_and_lineage.md), and data-quality rules are detailed in [Governance, Data Quality Rules & Analytical Assumptions](docs/governance_and_quality_rules.md).
 
 ---
 
@@ -105,30 +108,31 @@ Detailed column contracts live in [Data Dictionary & Source-to-Target Lineage](d
 
 ## Running in Microsoft Fabric
 
-`pl_nyc_analytics_master` runs in one of two mutually exclusive month modes (`nb_resolve_taxi_months` fails fast when both `months` and `discover_months: true` are supplied).
+1. Store the OpenAQ API token in `lh_bronze/Files/_secrets/openaq.json` (or configure Azure Key Vault settings as described in [Governance & Quality Rules](docs/governance_and_quality_rules.md#4-operations-secrets-and-monitoring)).
+2. Trigger `pl_nyc_analytics_master` in one of two mutually exclusive month modes (`nb_resolve_taxi_months` fails fast when both `months` and `discover_months: true` are supplied):
 
-To ingest and process an explicit list of months:
+   To ingest and process an explicit list of months:
 
-```json
-{
-  "months": ["2025-11", "2025-12", "2026-01", "2026-02", "2026-03"],
-  "discover_months": false,
-  "ingest_taxi": true,
-  "ingest_openaq": true,
-  "ingest_economics": true
-}
-```
+   ```json
+   {
+     "months": ["2025-11", "2025-12", "2026-01", "2026-02", "2026-03"],
+     "discover_months": false,
+     "ingest_taxi": true,
+     "ingest_openaq": true,
+     "ingest_economics": true
+   }
+   ```
 
-To reprocess every valid Yellow Taxi Parquet month already sitting in `lh_bronze/Files/taxi` without re-downloading TLC files (set `ingest_taxi` to `false` explicitly, since its pipeline default is `true`):
+   To reprocess every valid Yellow Taxi Parquet month already in `lh_bronze/Files/taxi` without re-downloading TLC files (set `ingest_taxi` to `false` explicitly, since its pipeline default is `true`):
 
-```json
-{
-  "months": [],
-  "discover_months": true,
-  "ingest_taxi": false,
-  "ingest_openaq": true,
-  "ingest_economics": true
-}
-```
+   ```json
+   {
+     "months": [],
+     "discover_months": true,
+     "ingest_taxi": false,
+     "ingest_openaq": true,
+     "ingest_economics": true
+   }
+   ```
 
-OpenAQ ingestion expects an API key stored in `lh_bronze/Files/_secrets/openaq.json` (or passed via pipeline/Azure Key Vault settings; see [Governance & Quality Rules](docs/governance_and_quality_rules.md#4-operations-secrets--monitoring)). Once Gold finishes cleanly, run [nb_analytics_insights](nb_analytics_insights.Notebook/notebook-content.py) interactively with `MONTHS_JSON = "[]"` to inspect all available months or pass an explicit JSON array to slice a subset.
+3. Once Gold validation finishes, run [nb_analytics_insights](nb_analytics_insights.Notebook/notebook-content.py) interactively with `MONTHS_JSON = "[]"` to visualize all available months, or supply a JSON array to inspect a subset.
