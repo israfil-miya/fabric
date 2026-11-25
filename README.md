@@ -52,9 +52,9 @@ flowchart LR
         VAL["nb_validate_pipeline_run -> etl_run_log"]
     end
 
-    subgraph Serve["Warehouse & BI"]
-        WH["wh_nyc_analytics (Star Schema Views)"]
-        PBI["Power BI Semantic Model & 5 Reports"]
+    subgraph Serve["Warehouse & Analytics"]
+        WH["wh_nyc_analytics (18 Star-Schema Views)"]
+        VIS["nb_analytics_insights (Charts & KPIs)"]
     end
 
     RES --> TLC & OAQ & WB & ECB
@@ -64,7 +64,8 @@ flowchart LR
     ECB --> B4 --> S3
     G1 & G2 --> G4
     G4 & G3 --> VAL
-    G1 & G2 & G3 & G4 & VAL --> WH --> PBI
+    G1 & G2 & G3 & G4 & VAL --> WH
+    G1 & G2 & G3 & G4 --> VIS
 ```
 
 ---
@@ -105,9 +106,8 @@ flowchart LR
 | Combined Gold | Month-scoped left join of `fact_taxi_daily` and `fact_air_quality_daily_citywide` | [nb_taxi_air_quality_gold](nb_taxi_air_quality_gold.Notebook/notebook-content.py) |
 | Final Validation & Logging | Reconciles all layers and writes `lh_gold.dbo.etl_run_log` | [nb_validate_pipeline_run](nb_validate_pipeline_run.Notebook/notebook-content.py) |
 | Analytical Visualizations | Generates Phase 4 charts & answers all 4 analytical questions | [nb_analytics_insights](nb_analytics_insights.Notebook/notebook-content.py) |
-| Warehouse Star Schema | T-SQL views for `wh_nyc_analytics` (facts, dims, EUR conversion, quality audits) | [wh_nyc_analytics_star_schema.sql](sql/wh_nyc_analytics_star_schema.sql) |
+| Warehouse Star Schema | Fabric Warehouse SQL project & 18 star-schema/audit views | [wh_nyc_analytics.sqlproj](wh_nyc_analytics.Warehouse/wh_nyc_analytics.sqlproj) |
 | Docs: Data Dictionary & Lineage | Table schemas, grains, and source-to-target mappings | [data_dictionary_and_lineage.md](docs/data_dictionary_and_lineage.md) |
-| Docs: Power BI & Semantic Model | Star-schema relationships, DAX measures, and 5-report blueprint | [powerbi_semantic_model_and_reports.md](docs/powerbi_semantic_model_and_reports.md) |
 | Docs: Governance & Quality Rules | Quality classifications, TLC/ECB/OpenAQ assumptions, and operations runbook | [governance_and_quality_rules.md](docs/governance_and_quality_rules.md) |
 
 ---

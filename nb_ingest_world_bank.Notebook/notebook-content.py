@@ -23,11 +23,10 @@
 # MARKDOWN ********************
 
 # ## Configuration
-# Derives the World Bank GDP year window from `MONTHS_JSON` (with lookback years for annual context).
 
 # PARAMETERS CELL ********************
 
-MONTHS_JSON = '["2025-11","2025-12","2026-01","2026-02","2026-03"]'
+MONTHS_JSON = "[]"
 COUNTRIES_JSON = '["USA", "EMU"]'
 INDICATOR = "NY.GDP.MKTP.CD"
 LOOKBACK_YEARS = 5
@@ -85,24 +84,15 @@ print("countries:", COUNTRIES, "| indicator:", INDICATOR)
 # META   "language_group": "synapse_pyspark"
 # META }
 
+# MARKDOWN ********************
+
+# ## Fetch World Bank GDP
+
 # CELL ********************
 
-# Cell 1: Fetch World Bank GDP JSON with retries and raw preservation
-
-import json
 import time as time_mod
 from datetime import datetime, timezone
 import requests
-from pyspark.sql import functions as F
-from pyspark.sql.types import (
-    DoubleType,
-    IntegerType,
-    LongType,
-    StringType,
-    StructField,
-    StructType,
-    TimestampType,
-)
 
 BASE_URL = "https://api.worldbank.org/v2"
 RAW_ROOT = "Files/economics/world_bank/raw"
@@ -148,6 +138,7 @@ notebookutils.fs.mkdirs(raw_folder)
 
 all_records = []
 api_total_declared = None
+last_updated_date = None
 page = 1
 while True:
     payload = fetch_wb_page(page)
@@ -159,6 +150,7 @@ while True:
     meta, records = payload[0], payload[1] or []
     if api_total_declared is None:
         api_total_declared = int(meta.get("total", len(records)))
+        last_updated_date = meta.get("lastupdated")
     total_pages = int(meta.get("pages", 1))
     all_records.extend(records)
     print(f"Page {page}/{total_pages}: fetched {len(records)} records (declared total={api_total_declared})")
@@ -170,6 +162,30 @@ if len(all_records) != api_total_declared:
     raise ValueError(
         f"World Bank API pagination mismatch: declared total={api_total_declared}, fetched={len(all_records)}"
     )
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# ## Write Bronze Delta and Audit
+
+# CELL ********************
+
+from pyspark.sql import functions as F
+from pyspark.sql.types import (
+    DoubleType,
+    IntegerType,
+    LongType,
+    StringType,
+    StructField,
+    StructType,
+    TimestampType,
+)
 
 normalized_rows = []
 for rec in all_records:
@@ -188,7 +204,7 @@ for rec in all_records:
         "unit": rec.get("unit"),
         "obs_status": rec.get("obs_status"),
         "decimal": int(rec["decimal"]) if rec.get("decimal") is not None else None,
-        "last_updated_date": meta.get("lastupdated"),
+        "last_updated_date": last_updated_date,
         "ingested_at_utc": ingested_at_utc,
     })
 
@@ -211,10 +227,11 @@ GDP_SCHEMA = StructType([
 BRONZE_TABLE = "dbo.bronze_world_bank_gdp"
 new_df = spark.createDataFrame(normalized_rows, schema=GDP_SCHEMA)
 
+# Keep latest snapshot per key so overlapping multi-year reruns stay idempotent.
 if spark.catalog.tableExists(BRONZE_TABLE):
-    existing_df = spark.table(BRONZE_TABLE)
     merged_df = (
-        existing_df.unionByName(new_df, allowMissingColumns=True)
+        spark.table(BRONZE_TABLE)
+        .unionByName(new_df, allowMissingColumns=True)
         .orderBy(F.desc("ingested_at_utc"))
         .dropDuplicates(["indicator_id", "country_iso3", "year_raw"])
     )

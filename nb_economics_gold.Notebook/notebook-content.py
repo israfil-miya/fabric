@@ -30,7 +30,7 @@
 
 # PARAMETERS CELL ********************
 
-MONTHS_JSON = '["2025-11","2025-12","2026-01","2026-02","2026-03"]'
+MONTHS_JSON = "[]"
 
 # METADATA ********************
 
@@ -71,9 +71,11 @@ print("months to process:", MONTHS)
 # META   "language_group": "synapse_pyspark"
 # META }
 
-# CELL ********************
+# MARKDOWN ********************
 
-# Cell 1: Pre-flight Silver audit check and build dim_currency, dim_country, and fact_gdp_annual
+# ## Reference Dimensions and Annual GDP
+
+# CELL ********************
 
 from datetime import date, timedelta
 from pyspark.sql import Window
@@ -93,7 +95,6 @@ for ds in ("WORLD_BANK_GDP", "ECB_FX"):
     if ds not in audit_rows or not audit_rows[ds]["reconciliation_passed"]:
         raise ValueError(f"Silver economics audit check failed or missing for {ds}")
 
-# 1. dim_currency
 CURRENCY_SCHEMA = StructType([
     StructField("currency_code", StringType(), False),
     StructField("currency_name", StringType(), False),
@@ -112,7 +113,7 @@ dim_currency = spark.createDataFrame(currency_rows, schema=CURRENCY_SCHEMA)
     .saveAsTable("dbo.dim_currency")
 )
 
-# 2. dim_country (from valid + quarantined World Bank entities so metadata is complete)
+# Include quarantined entities so country metadata remains complete.
 silver_gdp = spark.table(SILVER_GDP_TABLE)
 silver_gdp_q = spark.table(SILVER_GDP_Q_TABLE)
 all_gdp_entities = silver_gdp.select(
@@ -144,7 +145,6 @@ dim_country = (
     .saveAsTable("dbo.dim_country")
 )
 
-# 3. fact_gdp_annual (numerical annual GDP is modeled as a fact, not a dimension)
 fact_gdp_annual = (
     silver_gdp
     .select(
@@ -174,9 +174,11 @@ print(f"wrote dim_currency ({dim_currency.count()}), dim_country ({dim_country.c
 # META   "language_group": "synapse_pyspark"
 # META }
 
-# CELL ********************
+# MARKDOWN ********************
 
-# Cell 2: Build calendar-complete fact_fx_daily with explicit ECB last-business-day carry-forward policy
+# ## Daily FX with Carry-Forward Policy
+
+# CELL ********************
 
 def next_month(ms):
     y, m = int(ms[:4]), int(ms[5:7])
@@ -272,9 +274,11 @@ for ym in sorted(MONTHS):
 # META   "language_group": "synapse_pyspark"
 # META }
 
-# CELL ********************
+# MARKDOWN ********************
 
-# Cell 3: Validate economic Gold dimensions and facts
+# ## Validation
+
+# CELL ********************
 
 dim_ccy = spark.table("dbo.dim_currency")
 dim_ctry = spark.table("dbo.dim_country")
@@ -294,7 +298,6 @@ if gdp_dups > 0:
 if fact_gdp.count() != spark.table(SILVER_GDP_TABLE).count():
     problems.append("fact_gdp_annual count does not match silver_world_bank_gdp")
 
-# Validate fact_fx_daily scoped to MONTHS
 expected_fx_days = sum(
     (date.fromisoformat(next_month(f"{ym}-01")) - date.fromisoformat(f"{ym}-01")).days
     for ym in MONTHS

@@ -103,9 +103,11 @@ dim_date = spark.table("dbo.dim_date").filter(F.col("year_month").isin(MONTHS))
 # META   "language_group": "synapse_pyspark"
 # META }
 
-# CELL ********************
+# MARKDOWN ********************
 
-# Section 1: Mobility Dashboard — Daily Trips, Revenue (Gross vs Net), Zero-Distance Share & Top Zones
+# ## Mobility Overview
+
+# CELL ********************
 
 taxi_daily_pdf = (
     spark.table("dbo.fact_taxi_daily")
@@ -181,9 +183,11 @@ plt.show()
 # META   "language_group": "synapse_pyspark"
 # META }
 
-# CELL ********************
+# MARKDOWN ********************
 
-# Section 2: Air Quality Dashboard — 8-Monitor Network PM2.5 & Sensor Coverage
+# ## Air Quality Overview
+
+# CELL ********************
 
 aq_citywide_pdf = (
     spark.table("dbo.fact_air_quality_daily_citywide")
@@ -267,9 +271,11 @@ plt.show()
 # META   "language_group": "synapse_pyspark"
 # META }
 
-# CELL ********************
+# MARKDOWN ********************
 
-# Section 3: Key Questions #1 & #2 — Mobility vs. Air Quality (Daily & Hourly Co-Movement)
+# ## Mobility vs Air Quality
+
+# CELL ********************
 
 combined_pdf = (
     spark.table("dbo.fact_taxi_air_quality_daily")
@@ -359,9 +365,11 @@ plt.show()
 # META   "language_group": "synapse_pyspark"
 # META }
 
-# CELL ********************
+# MARKDOWN ********************
 
-# Section 4: Key Questions #3 & #4 — Economics: USD vs. EUR Revenue, FX Carry-Forward & Annual GDP
+# ## Economics, FX and GDP
+
+# CELL ********************
 
 econ_daily_pdf = (
     spark.table("dbo.fact_taxi_daily").alias("t")
@@ -439,9 +447,11 @@ plt.show()
 # META   "language_group": "synapse_pyspark"
 # META }
 
-# CELL ********************
+# MARKDOWN ********************
 
-# Section 5: Data Quality & Reconciliation Audit Summary
+# ## Data Quality and Reconciliation Audit
+
+# CELL ********************
 
 taxi_audit_pdf = (
     spark.table("lh_silver.dbo.silver_taxi_quality_audit")

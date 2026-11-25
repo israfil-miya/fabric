@@ -71,9 +71,11 @@ print("months to process:", MONTHS)
 # META   "language_group": "synapse_pyspark"
 # META }
 
-# CELL ********************
+# MARKDOWN ********************
 
-# Cell 1: Pre-flight audit check and load Silver source tables for MONTHS
+# ## Pre-Flight Check and Load Silver Sources
+
+# CELL ********************
 
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -121,9 +123,11 @@ print(f"Quarantined records in MONTHS: {silver_quarantine.count():,}")
 # META   "language_group": "synapse_pyspark"
 # META }
 
-# CELL ********************
+# MARKDOWN ********************
 
-# Cell 2: Validate Silver source data for MONTHS
+# ## Validate Silver Source Data
+
+# CELL ********************
 
 null_sensor_ids = silver_sensor.filter(F.col("sensor_id").isNull()).count()
 duplicate_sensor_ids = (
@@ -214,9 +218,11 @@ print("All source validations passed.")
 # META   "language_group": "synapse_pyspark"
 # META }
 
-# CELL ********************
+# MARKDOWN ********************
 
-# Cell 3: Create / refresh static sensor dimension
+# ## Sensor Dimension
+
+# CELL ********************
 
 dim_air_quality_sensor = silver_sensor
 
@@ -240,9 +246,11 @@ print(
 # META   "language_group": "synapse_pyspark"
 # META }
 
-# CELL ********************
+# MARKDOWN ********************
 
-# Cell 4: Aggregate accepted and quarantined hourly measurements by sensor and date
+# ## Aggregate Daily Sensor Metrics
+
+# CELL ********************
 
 valid_daily = (
     silver_hourly
@@ -298,9 +306,11 @@ print(f"Quarantined daily sensor groups: {quarantine_daily.count():,}")
 # META   "language_group": "synapse_pyspark"
 # META }
 
-# CELL ********************
+# MARKDOWN ********************
 
-# Cell 5: Build complete calendar-date grid for MONTHS (preserving zero-measurement dates & DST hours)
+# ## Daily Sensor Fact
+
+# CELL ********************
 
 def next_month(ms):
     y, m = int(ms[:4]), int(ms[5:7])
@@ -402,9 +412,11 @@ for ym, month_start, month_end in month_ranges:
 # META   "language_group": "synapse_pyspark"
 # META }
 
-# CELL ********************
+# MARKDOWN ********************
 
-# Cell 6: Validate daily sensor Gold fact against Silver for MONTHS
+# ## Validate Daily Sensor Fact
+
+# CELL ********************
 
 gold_sensor = spark.read.table("dbo.dim_air_quality_sensor")
 gold_daily = (
@@ -469,9 +481,11 @@ display(
 # META   "language_group": "synapse_pyspark"
 # META }
 
-# CELL ********************
+# MARKDOWN ********************
 
-# Cell 7: Build citywide daily monitoring-network estimate for MONTHS and write month-scoped
+# ## Citywide Daily Fact
+
+# CELL ********************
 
 MIN_SENSOR_COVERAGE_PCT = 75.0
 MIN_ELIGIBLE_SENSORS = 4
@@ -551,9 +565,11 @@ for ym, month_start, month_end in month_ranges:
 # META   "language_group": "synapse_pyspark"
 # META }
 
-# CELL ********************
+# MARKDOWN ********************
 
-# Cell 8: Validate citywide Gold fact for MONTHS
+# ## Validate Citywide Daily Fact
+
+# CELL ********************
 
 gold_citywide = (
     spark.read.table("dbo.fact_air_quality_daily_citywide")
@@ -596,9 +612,11 @@ gold_citywide.agg(
 # META   "language_group": "synapse_pyspark"
 # META }
 
-# CELL ********************
+# MARKDOWN ********************
 
-# Cell 9: Build and validate citywide hourly monitoring-network estimate (fact_air_quality_hourly_citywide)
+# ## Citywide Hourly Fact
+
+# CELL ********************
 
 from collections import Counter
 

@@ -27,7 +27,7 @@
 
 # PARAMETERS CELL ********************
 
-MONTHS_JSON = '["2025-11","2025-12","2026-01","2026-02","2026-03"]'
+MONTHS_JSON = "[]"
 
 # METADATA ********************
 
@@ -68,9 +68,11 @@ print("months to process:", MONTHS)
 # META   "language_group": "synapse_pyspark"
 # META }
 
-# CELL ********************
+# MARKDOWN ********************
 
-# Cell 1: Build combined taxi and air-quality daily fact with month-scoped replacement
+# ## Build Combined Daily Fact
+
+# CELL ********************
 
 from datetime import date
 from pyspark.sql import functions as F
@@ -154,9 +156,11 @@ for ym in sorted(MONTHS):
 # META   "language_group": "synapse_pyspark"
 # META }
 
-# CELL ********************
+# MARKDOWN ********************
 
-# Cell 2: Validate the combined Gold fact scoped to MONTHS
+# ## Validation
+
+# CELL ********************
 
 taxi = spark.table("dbo.fact_taxi_daily")
 combined = spark.table(TARGET_TABLE)

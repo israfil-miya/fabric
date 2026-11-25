@@ -23,11 +23,10 @@
 # MARKDOWN ********************
 
 # ## Configuration
-# Derives the ECB daily exchange-rate window from `MONTHS_JSON` (with a 14-day lookback buffer so weekend/holiday month starts always have a prior business-day rate).
 
 # PARAMETERS CELL ********************
 
-MONTHS_JSON = '["2025-11","2025-12","2026-01","2026-02","2026-03"]'
+MONTHS_JSON = "[]"
 CURRENCY_SERIES = "D.USD.EUR.SP00.A"
 LOOKBACK_DAYS = 14
 
@@ -71,24 +70,17 @@ print("ECB series:", CURRENCY_SERIES)
 # META   "language_group": "synapse_pyspark"
 # META }
 
-# CELL ********************
+# MARKDOWN ********************
 
-# Cell 1: Fetch ECB daily FX series CSV, preserve raw file, and write normalized Bronze Delta
+# ## Fetch ECB FX Series
+
+# CELL ********************
 
 import csv
 import io
 import time as time_mod
 from datetime import date, datetime, timedelta, timezone
 import requests
-from pyspark.sql import functions as F
-from pyspark.sql.types import (
-    DoubleType,
-    LongType,
-    StringType,
-    StructField,
-    StructType,
-    TimestampType,
-)
 
 BASE_URL = "https://data-api.ecb.europa.eu/service/data/EXR"
 RAW_ROOT = "Files/economics/ecb_fx/raw"
@@ -102,6 +94,7 @@ def next_month_start(ym):
 
 min_date = min(date.fromisoformat(f"{ym}-01") for ym in MONTHS)
 max_date = max(next_month_start(ym) - timedelta(days=1) for ym in MONTHS)
+# Fetch 14 extra days before min_date so weekend/holiday month-starts have a prior business-day rate.
 fetch_start = min_date - timedelta(days=int(LOOKBACK_DAYS))
 fetch_end = max_date
 ingested_at_utc = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -141,10 +134,32 @@ notebookutils.fs.mkdirs(raw_folder)
 notebookutils.fs.put(raw_file, csv_text, True)
 print(f"Preserved raw ECB CSV at {raw_file}")
 
-reader = csv.DictReader(io.StringIO(csv_text))
-raw_rows = list(reader)
+raw_rows = list(csv.DictReader(io.StringIO(csv_text)))
 if not raw_rows:
     raise ValueError(f"No observations returned by ECB for {fetch_start}..{fetch_end}")
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# ## Write Bronze Delta and Audit
+
+# CELL ********************
+
+from pyspark.sql import functions as F
+from pyspark.sql.types import (
+    DoubleType,
+    LongType,
+    StringType,
+    StructField,
+    StructType,
+    TimestampType,
+)
 
 normalized_rows = []
 for r in raw_rows:
@@ -188,9 +203,9 @@ BRONZE_TABLE = "dbo.bronze_ecb_fx"
 new_df = spark.createDataFrame(normalized_rows, schema=FX_SCHEMA)
 
 if spark.catalog.tableExists(BRONZE_TABLE):
-    existing_df = spark.table(BRONZE_TABLE)
     merged_df = (
-        existing_df.unionByName(new_df, allowMissingColumns=True)
+        spark.table(BRONZE_TABLE)
+        .unionByName(new_df, allowMissingColumns=True)
         .orderBy(F.desc("ingested_at_utc"))
         .dropDuplicates(["series_key", "observation_date_str"])
     )

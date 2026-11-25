@@ -30,8 +30,7 @@
 
 # PARAMETERS CELL ********************
 
-MONTHS_JSON = '["2025-11","2025-12","2026-01","2026-02","2026-03"]'
-SOURCE_MODE = "auto"  # "auto" (Bronze Delta if present, else CSV), "delta", or "csv"
+MONTHS_JSON = "[]"
 INSPECT_CANDIDATE_SENSORS = True
 
 # METADATA ********************
@@ -65,7 +64,6 @@ def parse_months(months_json):
 
 MONTHS = parse_months(MONTHS_JSON)
 print("months to process:", MONTHS)
-print("source mode:", SOURCE_MODE)
 
 # METADATA ********************
 
@@ -74,9 +72,11 @@ print("source mode:", SOURCE_MODE)
 # META   "language_group": "synapse_pyspark"
 # META }
 
-# CELL ********************
+# MARKDOWN ********************
 
-# Cell 1: Load Bronze OpenAQ data (Delta tables when available, else CSV files)
+# ## Load Bronze OpenAQ Tables and Resolve Scope
+
+# CELL ********************
 
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -93,10 +93,6 @@ from pyspark.sql.types import (
 
 spark.conf.set("spark.sql.session.timeZone", "UTC")
 
-HOURLY_ABFS_PATH = (
-    "abfss://nyc_analytics@onelake.dfs.fabric.microsoft.com/lh_bronze.Lakehouse/Files/air_quality/openaq/"
-)
-SOURCE_DIR = HOURLY_ABFS_PATH.rstrip("/")
 LOCAL_TIMEZONE = "America/New_York"
 
 # Selected 8 monitoring-network sensors (do not expand without formal review)
@@ -112,29 +108,10 @@ BRONZE_DELTA_TABLES = {
     "flags": "lh_bronze.dbo.bronze_openaq_flags",
 }
 
-BRONZE_CSV_FILES = {
-    "hourly": "openaq_hourly_measurements.csv",
-    "sensor": "openaq_sensor_metadata.csv",
-    "location": "openaq_location_metadata.csv",
-    "flags": "openaq_sensor_flags.csv",
-}
-
 
 def next_month(ms):
     y, m = int(ms[:4]), int(ms[5:7])
     return f"{y + (m == 12)}-{(m % 12) + 1:02d}-01"
-
-
-def read_csv(filename):
-    return (
-        spark.read
-        .format("csv")
-        .option("header", "true")
-        .option("inferSchema", "false")
-        .option("multiLine", "true")
-        .option("escape", '"')
-        .load(f"{SOURCE_DIR}/{filename}")
-    )
 
 
 def month_local_bounds_utc(ym):
@@ -152,23 +129,15 @@ def month_local_bounds_utc(ym):
     )
 
 
-delta_available = all(spark.catalog.tableExists(t) for t in BRONZE_DELTA_TABLES.values())
-if SOURCE_MODE == "delta" and not delta_available:
-    raise ValueError(f"SOURCE_MODE='delta' requested, but missing Bronze tables: {BRONZE_DELTA_TABLES}")
-use_delta = (SOURCE_MODE == "delta") or (SOURCE_MODE == "auto" and delta_available)
+missing_tables = [t for t in BRONZE_DELTA_TABLES.values() if not spark.catalog.tableExists(t)]
+if missing_tables:
+    raise ValueError(f"Missing OpenAQ Bronze tables (run nb_ingest_openaq first): {missing_tables}")
 
-if use_delta:
-    hourly_raw = spark.table(BRONZE_DELTA_TABLES["hourly"])
-    sensor_raw = spark.table(BRONZE_DELTA_TABLES["sensor"])
-    location_raw = spark.table(BRONZE_DELTA_TABLES["location"])
-    flags_raw = spark.table(BRONZE_DELTA_TABLES["flags"])
-    print("Loaded Bronze OpenAQ Delta tables.")
-else:
-    hourly_raw = read_csv(BRONZE_CSV_FILES["hourly"])
-    sensor_raw = read_csv(BRONZE_CSV_FILES["sensor"])
-    location_raw = read_csv(BRONZE_CSV_FILES["location"])
-    flags_raw = read_csv(BRONZE_CSV_FILES["flags"])
-    print("Loaded Bronze OpenAQ CSV source files.")
+hourly_raw = spark.table(BRONZE_DELTA_TABLES["hourly"])
+sensor_raw = spark.table(BRONZE_DELTA_TABLES["sensor"])
+location_raw = spark.table(BRONZE_DELTA_TABLES["location"])
+flags_raw = spark.table(BRONZE_DELTA_TABLES["flags"])
+print("Loaded Bronze OpenAQ Delta tables.")
 
 # METADATA ********************
 
@@ -177,9 +146,11 @@ else:
 # META   "language_group": "synapse_pyspark"
 # META }
 
-# CELL ********************
+# MARKDOWN ********************
 
-# Cell 2: Standardize hourly measurements and classify data quality (preserving unknown flags & multi-reasons)
+# ## Standardize Hourly Measurements and Quality Rules
+
+# CELL ********************
 
 
 def parse_iso_timestamp(column_name):
@@ -333,9 +304,11 @@ display(
 # META   "language_group": "synapse_pyspark"
 # META }
 
-# CELL ********************
+# MARKDOWN ********************
 
-# Cell 3: Build and validate the Silver sensor dimension (+ optional 11-sensor diagnostic comparison)
+# ## Build and Validate Sensor Dimension
+
+# CELL ********************
 
 def parse_locations(df):
     return (
@@ -479,9 +452,11 @@ print(f"Validated Silver sensor records: {silver_sensor.count():,}")
 # META   "language_group": "synapse_pyspark"
 # META }
 
-# CELL ********************
+# MARKDOWN ********************
 
-# Cell 4: Prepare OpenAQ flag events overlapping selected MONTHS (preserving all overlapping events)
+# ## Prepare Overlapping Flag Events
+
+# CELL ********************
 
 flags_parsed = (
     flags_raw
@@ -556,11 +531,13 @@ print(f"Prepared OpenAQ flag events overlapping MONTHS: {flags.count():,}")
 # META   "language_group": "synapse_pyspark"
 # META }
 
+# MARKDOWN ********************
+
+# ## Enrich Observations and Build Clean vs Quarantine Datasets
+
 # CELL ********************
 
-# Cell 5: Enrich hourly observations with sensor metadata and overlapping flag-event summaries
-
-# Attach active interval flag labels per (sensor_id, timestamp_utc) without collapsing multiple flags.
+# Keep multiple active flags separate per sensor-hour instead of collapsing them.
 hourly_flag_events = (
     hourly.select("sensor_id", "timestamp_utc", "timestamp_end_utc").alias("obs")
     .join(
@@ -688,7 +665,6 @@ quarantined_hourly = (
     )
 )
 
-# Validate Silver datasets prior to writing.
 overlapping_hourly_records = (
     silver_hourly.select("sensor_id", "timestamp_utc")
     .join(quarantined_hourly.select("sensor_id", "timestamp_utc"), on=["sensor_id", "timestamp_utc"], how="inner")
@@ -722,9 +698,11 @@ print(f"Prepared quarantined hourly records:    {quarantined_hourly.count():,}")
 # META   "language_group": "synapse_pyspark"
 # META }
 
-# CELL ********************
+# MARKDOWN ********************
 
-# Cell 6: Month-scoped writes and reconciliation audit
+# ## Write Silver Tables and Reconcile
+
+# CELL ********************
 
 SILVER_HOURLY_TABLE = "dbo.silver_air_quality_hourly"
 SILVER_QUARANTINE_TABLE = "dbo.silver_air_quality_quarantine"
@@ -746,14 +724,13 @@ def write_date_range_month(df, table_name, month_start, month_end):
         df.write.format("delta").saveAsTable(table_name)
 
 
-# 1. Sensor dimension (static validated dimension)
 (
     silver_sensor.write.format("delta").mode("overwrite")
     .option("overwriteSchema", "true")
     .saveAsTable(SILVER_SENSOR_TABLE)
 )
 
-# 2. Flags table (preserve existing flags outside selected MONTHS, update overlapping flags cleanly)
+# Preserve existing flags outside MONTHS while refreshing overlapping intervals.
 if spark.catalog.tableExists(SILVER_FLAGS_TABLE):
     existing_flags = spark.table(SILVER_FLAGS_TABLE)
     existing_local = (
@@ -803,7 +780,6 @@ AUDIT_SCHEMA = StructType([
     StructField("reconciliation_passed", BooleanType(), False),
 ])
 
-# 3. Month-scoped writes and reconciliation for hourly, quarantine, and quality audit
 audit_rows = []
 for ym in MONTHS:
     start_d, end_d, _, _ = month_local_bounds_utc(ym)
@@ -912,7 +888,6 @@ print("\nSilver Air Quality Audit Summary:")
     .show(truncate=False)
 )
 
-# Quarantine breakdown for auditability across selected MONTHS.
 display(
     spark.table(SILVER_QUARANTINE_TABLE)
     .filter(F.date_format("local_date", "yyyy-MM").isin(MONTHS))

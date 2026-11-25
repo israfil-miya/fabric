@@ -26,11 +26,10 @@
 # MARKDOWN ********************
 
 # ## Configuration
-# The pipeline passes the resolved month list as JSON. Set MONTHS_JSON when running interactively.
 
 # PARAMETERS CELL ********************
 
-MONTHS_JSON = '["2025-11","2025-12","2026-01","2026-02","2026-03"]'
+MONTHS_JSON = "[]"
 INSPECT_SAMPLES = False
 
 # METADATA ********************
@@ -74,9 +73,9 @@ print("months to process:", MONTHS)
 
 # MARKDOWN ********************
 
-# ## Silver Layer
-# Preserve all Bronze records, classify quality indicators, quarantine invalid-timeline
-# or out-of-month rows, and write monthly audit/reconciliation metrics.
+# MARKDOWN ********************
+
+# ## Helpers and Quality Rules
 
 # CELL ********************
 
@@ -113,8 +112,10 @@ SCHEMA = [
     ("cbd_congestion_fee", "double"),
 ]
 
-REQUIRED = {"tpep_pickup_datetime", "tpep_dropoff_datetime", "trip_distance",
-            "fare_amount", "total_amount", "PULocationID"}
+REQUIRED = {
+    "tpep_pickup_datetime", "tpep_dropoff_datetime", "trip_distance",
+    "fare_amount", "total_amount", "PULocationID",
+}
 
 QUALITY_FLAG_LABELS = [
     ("is_zero_distance", "ZERO_DISTANCE"),
@@ -141,24 +142,23 @@ QUARANTINE_FLAG_LABELS = [
 
 
 def next_month(ms):
-    """First day of the month after ms (exclusive end date)."""
     y, m = int(ms[:4]), int(ms[5:7])
     return f"{y + (m == 12)}-{(m % 12) + 1:02d}-01"
 
 
 def is_missing_num(col_name):
-    """True when a floating-point column is NULL or NaN."""
     c = F.col(col_name)
     return c.isNull() | F.isnan(c)
 
 
 def write_month_table(df, table_name, partition_col, year_month):
-    """Overwrite only the specified month when the Delta table exists."""
     if spark.catalog.tableExists(table_name):
-        (df.write.mode("overwrite").format("delta")
-           .option("replaceWhere", f"{partition_col} = '{year_month}'")
-           .option("mergeSchema", "true")
-           .saveAsTable(table_name))
+        (
+            df.write.mode("overwrite").format("delta")
+            .option("replaceWhere", f"{partition_col} = '{year_month}'")
+            .option("mergeSchema", "true")
+            .saveAsTable(table_name)
+        )
     else:
         df.write.format("delta").saveAsTable(table_name)
 
@@ -168,30 +168,22 @@ def load_month(month_start):
     month_end = next_month(month_start)
     source_file = f"yellow_tripdata_{year_month}.parquet"
     raw_in = spark.read.parquet(f"{BRONZE_TAXI_PATH}/{source_file}")
-
-    # incoming type of the pickup column, for the summary line
     in_type = dict(raw_in.dtypes).get("tpep_pickup_datetime", "missing")
 
-    # case-insensitive column matching; fail early if a required column is absent
     lower = {c.lower(): c for c in raw_in.columns}
     missing_req = {c for c in REQUIRED if c.lower() not in lower}
     assert not missing_req, f"missing required columns: {missing_req}"
 
-    # fixed schema: cast every column, add nulls for columns this month lacks
     raw = raw_in.select(*[
-        (F.col(lower[n.lower()]).cast(t) if n.lower() in lower
-         else F.lit(None).cast(t)).alias(n)
+        (F.col(lower[n.lower()]).cast(t) if n.lower() in lower else F.lit(None).cast(t)).alias(n)
         for n, t in SCHEMA
     ])
 
     month_start_ts = F.lit(month_start).cast("timestamp_ntz")
     month_end_ts = F.lit(month_end).cast("timestamp_ntz")
 
-    # Deterministic content hash of source fields for non-destructive duplicate detection.
-    record_hash_expr = F.sha2(
-        F.to_json(F.struct(*[F.col(n) for n, _ in SCHEMA])),
-        256,
-    )
+    # Hash full source row for non-destructive duplicate detection.
+    record_hash_expr = F.sha2(F.to_json(F.struct(*[F.col(n) for n, _ in SCHEMA])), 256)
     dup_window = Window.partitionBy("record_hash")
 
     classified = (
@@ -202,30 +194,19 @@ def load_month(month_start):
         .withColumn("duplicate_group_size", F.count("*").over(dup_window))
         .withColumn(
             "pickup_date",
-            F.when(
-                F.col("tpep_pickup_datetime").isNotNull(),
-                F.to_date("tpep_pickup_datetime"),
-            ),
+            F.when(F.col("tpep_pickup_datetime").isNotNull(), F.to_date("tpep_pickup_datetime")),
         )
         .withColumn(
             "pickup_hour",
-            F.when(
-                F.col("tpep_pickup_datetime").isNotNull(),
-                F.hour("tpep_pickup_datetime"),
-            ),
+            F.when(F.col("tpep_pickup_datetime").isNotNull(), F.hour("tpep_pickup_datetime")),
         )
         .withColumn(
             "trip_duration_min",
             F.when(
-                F.col("tpep_pickup_datetime").isNotNull()
-                & F.col("tpep_dropoff_datetime").isNotNull(),
-                (
-                    F.unix_timestamp("tpep_dropoff_datetime")
-                    - F.unix_timestamp("tpep_pickup_datetime")
-                ) / 60.0,
+                F.col("tpep_pickup_datetime").isNotNull() & F.col("tpep_dropoff_datetime").isNotNull(),
+                (F.unix_timestamp("tpep_dropoff_datetime") - F.unix_timestamp("tpep_pickup_datetime")) / 60.0,
             ),
         )
-        # Quarantine flags (guaranteed non-null booleans)
         .withColumn("is_missing_pickup_datetime", F.col("tpep_pickup_datetime").isNull())
         .withColumn("is_missing_dropoff_datetime", F.col("tpep_dropoff_datetime").isNull())
         .withColumn(
@@ -237,49 +218,24 @@ def load_month(month_start):
         .withColumn(
             "is_out_of_month",
             F.col("tpep_pickup_datetime").isNotNull()
-            & (
-                (F.col("tpep_pickup_datetime") < month_start_ts)
-                | (F.col("tpep_pickup_datetime") >= month_end_ts)
-            ),
+            & ((F.col("tpep_pickup_datetime") < month_start_ts) | (F.col("tpep_pickup_datetime") >= month_end_ts)),
         )
-        # In-scope quality flags (guaranteed non-null booleans)
         .withColumn("is_missing_distance", is_missing_num("trip_distance"))
-        .withColumn(
-            "is_zero_distance",
-            (~is_missing_num("trip_distance")) & (F.col("trip_distance") == 0),
-        )
-        .withColumn(
-            "is_negative_distance",
-            (~is_missing_num("trip_distance")) & (F.col("trip_distance") < 0),
-        )
-        .withColumn(
-            "is_unusual_distance",
-            (~is_missing_num("trip_distance")) & (F.col("trip_distance") > 100),
-        )
+        .withColumn("is_zero_distance", (~is_missing_num("trip_distance")) & (F.col("trip_distance") == 0))
+        .withColumn("is_negative_distance", (~is_missing_num("trip_distance")) & (F.col("trip_distance") < 0))
+        .withColumn("is_unusual_distance", (~is_missing_num("trip_distance")) & (F.col("trip_distance") > 100))
         .withColumn(
             "is_zero_duration",
             F.col("tpep_pickup_datetime").isNotNull()
             & F.col("tpep_dropoff_datetime").isNotNull()
             & (F.col("tpep_dropoff_datetime") == F.col("tpep_pickup_datetime")),
         )
-        .withColumn(
-            "is_unusual_duration",
-            F.col("trip_duration_min").isNotNull() & (F.col("trip_duration_min") > 480),
-        )
+        .withColumn("is_unusual_duration", F.col("trip_duration_min").isNotNull() & (F.col("trip_duration_min") > 480))
         .withColumn("is_missing_fare", is_missing_num("fare_amount"))
         .withColumn("is_missing_total", is_missing_num("total_amount"))
-        .withColumn(
-            "is_missing_amount",
-            is_missing_num("fare_amount") | is_missing_num("total_amount"),
-        )
-        .withColumn(
-            "is_negative_fare",
-            (~is_missing_num("fare_amount")) & (F.col("fare_amount") < 0),
-        )
-        .withColumn(
-            "is_negative_total",
-            (~is_missing_num("total_amount")) & (F.col("total_amount") < 0),
-        )
+        .withColumn("is_missing_amount", is_missing_num("fare_amount") | is_missing_num("total_amount"))
+        .withColumn("is_negative_fare", (~is_missing_num("fare_amount")) & (F.col("fare_amount") < 0))
+        .withColumn("is_negative_total", (~is_missing_num("total_amount")) & (F.col("total_amount") < 0))
         .withColumn(
             "is_negative_amount",
             ((~is_missing_num("fare_amount")) & (F.col("fare_amount") < 0))
@@ -290,17 +246,9 @@ def load_month(month_start):
         .withColumn("is_duplicate_record", F.col("duplicate_group_size") > 1)
     )
 
-    flag_tokens = [
-        F.when(F.col(col_name), F.lit(label))
-        for col_name, label in QUALITY_FLAG_LABELS
-    ]
-    quarantine_tokens = [
-        F.when(F.col(col_name), F.lit(label))
-        for col_name, label in QUARANTINE_FLAG_LABELS
-    ]
-    issue_count_expr = sum(
-        F.col(col_name).cast("int") for col_name, _ in QUALITY_FLAG_LABELS
-    )
+    flag_tokens = [F.when(F.col(col_name), F.lit(label)) for col_name, label in QUALITY_FLAG_LABELS]
+    quarantine_tokens = [F.when(F.col(col_name), F.lit(label)) for col_name, label in QUARANTINE_FLAG_LABELS]
+    issue_count_expr = sum(F.col(col_name).cast("int") for col_name, _ in QUALITY_FLAG_LABELS)
 
     classified = (
         classified
@@ -310,9 +258,7 @@ def load_month(month_start):
         .withColumn("quarantine_reasons", F.concat_ws(",", *quarantine_tokens))
         .withColumn(
             "is_quarantined",
-            F.col("is_missing_pickup_datetime")
-            | F.col("is_dropoff_before_pickup")
-            | F.col("is_out_of_month"),
+            F.col("is_missing_pickup_datetime") | F.col("is_dropoff_before_pickup") | F.col("is_out_of_month"),
         )
         .cache()
     )
@@ -340,7 +286,6 @@ def load_month(month_start):
             .drop("is_quarantined")
         )
 
-        # Guard: nothing outside the month may enter silver_taxi
         bad = silver.filter(
             F.col("pickup_date").isNull()
             | (F.col("pickup_date") < month_start)
@@ -358,7 +303,7 @@ def load_month(month_start):
                 f"raw={raw_n}, silver={silver_n}, quarantine={quarantine_n}"
             )
 
-        # Legacy filter condition equivalence for diagnostic auditability
+        # Track what the pre-milestone filter would have discarded silently.
         legacy_kept_cond = (
             (~F.col("is_out_of_month"))
             & (~F.col("is_missing_pickup_datetime"))
@@ -369,14 +314,11 @@ def load_month(month_start):
             & (F.col("trip_duration_min") <= 480)
         )
 
-        # Compute monthly quality audit metrics in a single aggregation pass
         audit_stats = classified.agg(
             F.count("*").alias("bronze_row_count"),
             F.sum((~F.col("is_quarantined")).cast("long")).alias("silver_row_count"),
             F.sum(F.col("is_quarantined").cast("long")).alias("quarantine_total_count"),
-            F.sum(
-                (F.col("is_quarantined") & (~F.col("is_out_of_month"))).cast("long")
-            ).alias("quarantine_in_scope_count"),
+            F.sum((F.col("is_quarantined") & (~F.col("is_out_of_month"))).cast("long")).alias("quarantine_in_scope_count"),
             F.sum(F.col("is_out_of_month").cast("long")).alias("quarantine_out_of_month_count"),
             F.sum(F.col("is_missing_pickup_datetime").cast("long")).alias("quarantine_missing_pickup_count"),
             F.sum(F.col("is_dropoff_before_pickup").cast("long")).alias("quarantine_dropoff_before_pickup_count"),
@@ -400,7 +342,6 @@ def load_month(month_start):
             F.sum((~legacy_kept_cond).cast("long")).alias("legacy_filter_excluded_count"),
         ).first().asDict()
 
-        # Excess duplicate rows in Bronze = sum(1 - 1/group_size) across duplicate rows
         dup_excess = (
             classified
             .filter(F.col("is_duplicate_record"))
@@ -410,7 +351,6 @@ def load_month(month_start):
             .first()["excess"]
         )
 
-        # Write Silver, Quarantine, and Audit tables with month-scoped replaceWhere
         write_month_table(silver, target, "year_month", year_month)
         write_month_table(quarantine, quarantine_target, "source_year_month", year_month)
 
@@ -451,7 +391,6 @@ def load_month(month_start):
                 f"expected_quarantine={quarantine_n}, written_quarantine={written_quarantine}"
             )
 
-        # Print negative-amount breakdown by payment_type for analytical investigation
         print(f"--- {year_month}: Negative fare/total by payment_type (in-scope Silver) ---")
         (
             silver
@@ -490,16 +429,25 @@ def load_month(month_start):
     finally:
         classified.unpersist()
 
+# METADATA ********************
 
-results = []
-for ym in MONTHS:
-    results.append(load_month(f"{ym}-01"))
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# ## Transform, Quarantine and Audit
+
+# CELL ********************
+
+results = [load_month(f"{ym}-01") for ym in MONTHS]
 
 print("---- summary ----")
 for ym, msg in results:
     print(ym, msg)
 
-# Display the monthly audit rows for processed months
 (
     spark.table(audit_target)
     .filter(F.col("source_year_month").isin(MONTHS))

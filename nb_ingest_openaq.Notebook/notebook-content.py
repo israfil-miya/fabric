@@ -23,12 +23,10 @@
 # MARKDOWN ********************
 
 # ## Configuration
-# The pipeline passes the resolved month list as JSON. Set `MONTHS_JSON` when running interactively.
-# Reads the OpenAQ API key from `SECRET_FILE_PATH` in `lh_bronze` (or `OPENAQ_API_KEY` / optional `KEY_VAULT_URL`).
 
 # PARAMETERS CELL ********************
 
-MONTHS_JSON = '["2025-11","2025-12","2026-01","2026-02","2026-03"]'
+MONTHS_JSON = "[]"
 SECRET_FILE_PATH = "Files/_secrets/openaq.json"
 KEY_VAULT_URL = ""
 KEY_VAULT_SECRET_NAME = "openaq-api-key"
@@ -86,13 +84,15 @@ print("sensors to ingest:", SENSOR_IDS)
 # META   "language_group": "synapse_pyspark"
 # META }
 
-# CELL ********************
+# MARKDOWN ********************
 
-# Cell 1: Resolve OpenAQ API key and define timezone / API helpers
+# ## API Client and Key Resolution
+
+# CELL ********************
 
 import json
 import time as time_mod
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timezone
 from zoneinfo import ZoneInfo
 import requests
 from pyspark.sql import functions as F
@@ -115,7 +115,6 @@ POLITE_DELAY_SEC = 0.2
 
 RAW_ROOT = "Files/air_quality/openaq/raw"
 META_ROOT = "Files/air_quality/openaq/metadata"
-LEGACY_LOCATION_CSV = "Files/air_quality/openaq/openaq_location_metadata.csv"
 
 
 def resolve_api_key():
@@ -262,9 +261,11 @@ def clear_raw_pages(folder_path):
 # META   "language_group": "synapse_pyspark"
 # META }
 
-# CELL ********************
+# MARKDOWN ********************
 
-# Cell 2: Fetch sensor and location metadata (preserving raw JSON)
+# ## Fetch Sensor and Location Metadata
+
+# CELL ********************
 
 ingested_at_utc = datetime.now(timezone.utc).replace(tzinfo=None)
 
@@ -294,7 +295,6 @@ for sid in SENSOR_IDS:
     })
 
 # Discover NYC locations from OpenAQ v3 so sensor -> location metadata stays current.
-nyc_location_pages = []
 sensor_to_location = {}
 page = 1
 while True:
@@ -302,7 +302,6 @@ while True:
         "locations",
         params={"coordinates": "40.7128,-74.0060", "radius": 25000, "parameters_id": 2, "limit": PAGE_LIMIT, "page": page},
     )
-    nyc_location_pages.append(loc_payload)
     write_json_file(f"{META_ROOT}/locations/nyc_locations_page_{page:04d}.json", loc_payload)
     results = loc_payload.get("results") or []
     for loc in results:
@@ -313,26 +312,6 @@ while True:
     if len(results) < PAGE_LIMIT:
         break
     page += 1
-
-# Fallback: if any selected sensor fell outside the 25km NYC query, look up its location_id from existing CSV if present.
-missing_loc_sensors = [sid for sid in SENSOR_IDS if sid not in sensor_to_location]
-if missing_loc_sensors:
-    try:
-        legacy_loc_df = (
-            spark.read.format("csv").option("header", "true").load(LEGACY_LOCATION_CSV)
-            .select(F.col("sensor_id").cast("long").alias("sensor_id"), F.col("location_id").cast("long").alias("location_id"))
-            .filter(F.col("sensor_id").isin(missing_loc_sensors))
-            .collect()
-        )
-        for row in legacy_loc_df:
-            loc_id = row["location_id"]
-            if loc_id is not None:
-                loc_detail = api_get_json(f"locations/{loc_id}")
-                write_json_file(f"{META_ROOT}/locations/location_{loc_id}.json", loc_detail)
-                for loc in (loc_detail.get("results") or []):
-                    sensor_to_location[int(row["sensor_id"])] = loc
-    except Exception as exc:
-        print(f"Fallback location lookup skipped/failed for {missing_loc_sensors}: {exc}")
 
 still_missing_locs = [sid for sid in SENSOR_IDS if sid not in sensor_to_location]
 if still_missing_locs:
@@ -372,9 +351,11 @@ print(f"Fetched metadata for {len(sensor_rows)} sensors and {len(location_rows)}
 # META   "language_group": "synapse_pyspark"
 # META }
 
-# CELL ********************
+# MARKDOWN ********************
 
-# Cell 3: Fetch hourly measurements and sensor flags per sensor and month (preserving raw JSON)
+# ## Fetch Hourly Measurements and Sensor Flags
+
+# CELL ********************
 
 hourly_rows = []
 flag_rows = []
@@ -547,9 +528,11 @@ print(f"Total fetched flag events: {len(flag_rows):,}")
 # META   "language_group": "synapse_pyspark"
 # META }
 
-# CELL ********************
+# MARKDOWN ********************
 
-# Cell 4: Write normalized Bronze Delta tables and validate counts
+# ## Write Bronze Tables and Audit
+
+# CELL ********************
 
 HOURLY_SCHEMA = StructType([
     StructField("sensor_id", LongType(), False),

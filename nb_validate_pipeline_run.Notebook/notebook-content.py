@@ -76,9 +76,11 @@ print("months to validate:", MONTHS)
 # META   "language_group": "synapse_pyspark"
 # META }
 
-# CELL ********************
+# MARKDOWN ********************
 
-# Cell 1: Cross-layer reconciliation across Taxi, OpenAQ, Economics, and Combined Gold
+# ## Setup and Shared Helpers
+
+# CELL ********************
 
 import uuid
 from datetime import date, datetime, timezone
@@ -113,7 +115,19 @@ expected_days_by_month = {
     for ym in MONTHS
 }
 
-# ---- 1. Taxi Bronze -> Silver -> Gold reconciliation ----
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# ## Validate NYC Taxi
+
+# CELL ********************
+
 taxi_audit = {
     r["source_year_month"]: r
     for r in spark.table("lh_silver.dbo.silver_taxi_quality_audit")
@@ -162,7 +176,19 @@ for ym in MONTHS:
         "error_message": "; ".join(err) if err else None,
     })
 
-# ---- 2. OpenAQ Bronze -> Silver -> Gold reconciliation ----
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# ## Validate OpenAQ Air Quality
+
+# CELL ********************
+
 aq_bronze_audit = {}
 if spark.catalog.tableExists("lh_bronze.dbo.bronze_openaq_ingest_audit"):
     for r in (
@@ -255,7 +281,19 @@ for ym in MONTHS:
         "error_message": "; ".join(err) if err else None,
     })
 
-# ---- 3. Combined Taxi-Air Quality Gold ----
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# ## Validate Combined Taxi and Air Quality
+
+# CELL ********************
+
 combined_m = {
     r["year_month"]: r
     for r in spark.table("dbo.fact_taxi_air_quality_daily")
@@ -283,7 +321,19 @@ for ym in MONTHS:
         "error_message": "; ".join(err) if err else None,
     })
 
-# ---- 4. World Bank GDP & ECB FX reconciliation ----
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# ## Validate Economics
+
+# CELL ********************
+
 econ_audit = {
     r["dataset"]: r
     for r in spark.table("lh_silver.dbo.silver_economics_quality_audit").collect()
@@ -341,6 +391,19 @@ for ym in MONTHS:
         "records_written": int(fxm["rows"]) if fxm else 0,
         "error_message": "; ".join(err) if err else None,
     })
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# ## Write Pipeline Run Log
+
+# CELL ********************
 
 LOG_SCHEMA = StructType([
     StructField("run_id", StringType(), False),

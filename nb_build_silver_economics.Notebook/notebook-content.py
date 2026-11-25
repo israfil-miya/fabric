@@ -26,11 +26,10 @@
 # MARKDOWN ********************
 
 # ## Configuration
-# Validates the shared `MONTHS_JSON` parameter contract before transforming Bronze GDP and ECB FX tables.
 
 # PARAMETERS CELL ********************
 
-MONTHS_JSON = '["2025-11","2025-12","2026-01","2026-02","2026-03"]'
+MONTHS_JSON = "[]"
 
 # METADATA ********************
 
@@ -71,9 +70,11 @@ print("months context:", MONTHS)
 # META   "language_group": "synapse_pyspark"
 # META }
 
-# CELL ********************
+# MARKDOWN ********************
 
-# Cell 1: Clean, classify, and reconcile World Bank annual GDP
+# ## World Bank Annual GDP
+
+# CELL ********************
 
 from datetime import datetime, timezone
 from pyspark.sql import functions as F
@@ -151,9 +152,11 @@ if not gdp_passed:
 # META   "language_group": "synapse_pyspark"
 # META }
 
-# CELL ********************
+# MARKDOWN ********************
 
-# Cell 2: Clean, classify, and reconcile ECB daily FX rates
+# ## ECB Daily FX and Audit
+
+# CELL ********************
 
 BRONZE_FX_TABLE = "lh_bronze.dbo.bronze_ecb_fx"
 SILVER_FX_TABLE = "dbo.silver_ecb_fx"

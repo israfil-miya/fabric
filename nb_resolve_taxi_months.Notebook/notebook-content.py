@@ -27,14 +27,14 @@
 
 # PARAMETERS CELL ********************
 
-import json
-import re
-
 MONTHS_JSON = "[]"
 DISCOVER_MONTHS = False
 CHECK_FILES = True
 
 # CELL ********************
+
+import json
+import re
 
 TAXI_FOLDER = "Files/taxi"
 MONTH_PATTERN = re.compile(r"[0-9]{4}-(0[1-9]|1[0-2])")
