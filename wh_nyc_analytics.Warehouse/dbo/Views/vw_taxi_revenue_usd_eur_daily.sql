@@ -1,7 +1,4 @@
--- -----------------------------------------------------------------------------
--- 3. Analytical Conversion View: Daily Taxi Revenue in USD and EUR
---    Applies ECB's last-business-day carry-forward rate and retains rate_observation_date.
--- -----------------------------------------------------------------------------
+-- Currency conversion view (uses ECB last-business-day carry-forward rates on weekends/holidays)
 
 CREATE   VIEW dbo.vw_taxi_revenue_usd_eur_daily AS
 SELECT

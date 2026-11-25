@@ -1,24 +1,8 @@
--- =============================================================================
--- wh_nyc_analytics: Microsoft Fabric Warehouse Star Schema & Audit Views
--- =============================================================================
--- Prerequisites:
---   1. Create Warehouse `wh_nyc_analytics` in the `nyc_analytics` Fabric workspace.
---   2. Ensure `lh_gold` and `lh_silver` exist in the same workspace and have been
---      populated by `pl_nyc_analytics_master`.
---   3. Execute this script inside `wh_nyc_analytics`.
---
--- Design notes:
---   * Views query `lh_gold` / `lh_silver` via cross-database three-part names so
---     Warehouse data stays automatically current after each pipeline run without
---     duplicating Delta storage.
---   * Star schema uses shared conformed dimensions (`dim_date`, `dim_taxi_zone`,
---     `dim_air_quality_sensor`, `dim_currency`, `dim_country`) with NO direct
---     fact-to-fact relationships.
--- =============================================================================
+-- Cross-database views over lh_gold and lh_silver keep Warehouse queries
+-- current after each pipeline run without duplicating Delta storage.
+-- Fact views join only through conformed dimensions, never fact-to-fact.
 
--- -----------------------------------------------------------------------------
--- 1. Conformed Dimensions
--- -----------------------------------------------------------------------------
+-- Dimensions
 
 CREATE   VIEW dbo.dim_date AS
 SELECT
