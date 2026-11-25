@@ -485,17 +485,11 @@
     "parameters": {
       "months": {
         "type": "array",
-        "defaultValue": [
-          "2025-11",
-          "2025-12",
-          "2026-01",
-          "2026-02",
-          "2026-03"
-        ]
+        "defaultValue": []
       },
       "discover_months": {
         "type": "bool",
-        "defaultValue": false
+        "defaultValue": true
       },
       "ingest_taxi": {
         "type": "bool",
