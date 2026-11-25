@@ -74,8 +74,8 @@ print("months to process:", MONTHS)
 # MARKDOWN ********************
 
 # MARKDOWN ********************
-
 # ## Helpers and Quality Rules
+
 
 # CELL ********************
 
