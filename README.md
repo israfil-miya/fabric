@@ -76,9 +76,9 @@ For air quality and foreign exchange, the models prefer explicit gaps and proven
 
 ## What the Data Shows and Current Limitations
 
-Across November 2025 through March 2026 (`151` calendar days, `132` of which meet the daily air-quality coverage threshold after early-November sensor gaps), the charts in [nb_analytics_insights](nb_analytics_insights.Notebook/notebook-content.py) highlight practical relationships alongside clear analytical limits.
+Across November 2025 through March 2026 (`151` calendar days, `132` of which meet the daily air-quality coverage threshold after mid-to-late November sensor gaps), the charts in [nb_analytics_insights](nb_analytics_insights.Notebook/notebook-content.py) highlight practical relationships alongside clear analytical limits.
 
-Day-to-day NYC taxi volume and citywide PM2.5 do not follow a strong linear correlation, as weather, regional transport, and seasonal heating drive daily air-quality variance far more than cab counts alone. Hourly profiles are better suited for comparing weekday and weekend ridership peaks against diurnal particulate curves.
+Day-to-day NYC taxi volume and citywide PM2.5 show virtually no linear correlation (`Pearson r = 0.035` across `132` reliable days), indicating that factors outside Yellow Taxi ridership drive most of the daily variance. Hourly profiles are more informative than daily totals, contrasting a steady daytime climb in taxi trips (peaking around `18:00`) against a bimodal PM2.5 curve (a morning peak around `07:00`, a midday dip near `13:00`, and an evening peak between `20:00` and `21:00`).
 
 Coverage also bounds what can be claimed from the external reference data. Eight fixed AirNow monitors capture a network-level PM2.5 signal rather than neighborhood-level air quality across all 260+ TLC taxi zones, so `fact_taxi_hourly_zone` supports temporal and spatial demand analysis without implying zone-level pollution causality. Likewise, World Bank annual GDP provides multi-year U.S. versus Eurozone backdrop rather than an explanatory driver for a five-month operational window.
 
